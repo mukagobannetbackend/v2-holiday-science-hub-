@@ -1,0 +1,93 @@
+{% extends 'base.html' %}
+{% block title %}{{ page_heading }} ? Science Holiday Coaching Hub{% endblock %}
+{% block content %}
+<div class="page-head">
+    <div>
+        <span class="eyebrow">STAFF DIRECTORY</span>
+        <h1>{{ page_heading }}</h1>
+        <p>Enter accurate staff information. Only published profiles appear to visitors.</p>
+    </div>
+    <a class="btn" href="{{ url_for('manage_staff') }}">? Back to staff</a>
+</div>
+
+<form class="panel staff-edit-form" method="post" enctype="multipart/form-data">
+    <div class="form-grid">
+        <label>Full name *
+            <input name="full_name" maxlength="120" required
+                   value="{{ profile.full_name if profile else '' }}">
+        </label>
+
+        <label>Job title / position
+            <input name="job_title" maxlength="120"
+                   placeholder="e.g. Mathematics Teacher"
+                   value="{{ profile.job_title if profile else '' }}">
+        </label>
+
+        <label>Academic qualifications
+            <textarea name="qualifications" rows="3"
+                      placeholder="e.g. Bachelor of Science with Education">{{ profile.qualifications if profile else '' }}</textarea>
+        </label>
+
+        <label>Institution attended
+            <input name="institution" maxlength="180"
+                   value="{{ profile.institution if profile else '' }}">
+        </label>
+
+        <label class="full">Teaching or professional experience
+            <textarea name="experience" rows="4"
+                      placeholder="Describe relevant experience and years of service.">{{ profile.experience if profile else '' }}</textarea>
+        </label>
+
+        <label class="full">Short biography
+            <textarea name="bio" rows="4"
+                      placeholder="Introduce this staff member to visitors.">{{ profile.bio if profile else '' }}</textarea>
+        </label>
+
+        <label>Email address
+            <input type="email" name="email" maxlength="180"
+                   value="{{ profile.email if profile else '' }}">
+        </label>
+
+        <label>Phone number
+            <input type="tel" name="phone" maxlength="40"
+                   value="{{ profile.phone if profile else '' }}">
+        </label>
+
+        <label>WhatsApp number
+            <input type="tel" name="whatsapp" maxlength="40"
+                   placeholder="Include country code, e.g. +256..."
+                   value="{{ profile.whatsapp if profile else '' }}">
+        </label>
+
+        <label>Display order
+            <input type="number" name="display_order"
+                   value="{{ profile.display_order if profile else 0 }}">
+            <small>Lower numbers appear first.</small>
+        </label>
+
+        <label class="full">Staff photograph
+            <input type="file" name="photo" accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp">
+            <small>PNG, JPG, JPEG or WEBP. Maximum 5 MB.</small>
+        </label>
+
+        {% if profile and profile.photo_filename %}
+        <div class="full staff-current-photo">
+            <span>Current photograph</span>
+            <img src="{{ url_for('staff_photo', filename=profile.photo_filename) }}"
+                 alt="Current staff photograph">
+        </div>
+        {% endif %}
+
+        <label class="staff-publish-option full">
+            <input type="checkbox" name="is_published"
+                   {% if not profile or profile.is_published %}checked{% endif %}>
+            Publish this profile on the public About Us page
+        </label>
+
+        <div class="full form-actions">
+            <button class="btn primary" type="submit">Save staff profile</button>
+            <a class="btn" href="{{ url_for('manage_staff') }}">Cancel</a>
+        </div>
+    </div>
+</form>
+{% endblock %}

@@ -1,0 +1,16 @@
+{% extends 'base.html' %}{% block title %}Video lessons · Holiday Coaching Hub{% endblock %}{% block content %}
+<div class="page-head"><div><span class="eyebrow">VIDEO LESSONS</span><h1>Learn on demand.</h1>
+    <p>Official YouTube links are organised by your class, subject and topic.</p></div></div>
+    {% if user.role!='student' %}
+    <div class="panel form-panel">
+        <h2>Add a YouTube lesson</h2><form method="post" class="form-grid">
+            <label>Title<input name="title" required></label>
+            <label>Class<select name="class_id">{% for c in classes %}<option value="{{c.id}}">{{c.name}}</option>{% endfor %}</select></label>
+            <label>Subject<select name="subject_id">{% for s in subjects %}<option value="{{s.id}}">
+                {{s.name}}</option>{% endfor %}</select></label><label>Topic<input name="topic" required></label>
+                <label>YouTube URL<input name="youtube_url" type="url" placeholder="https://youtube.com/watch?v=..." required></label>
+                <label class="full">Description<textarea name="description"></textarea></label><button class="btn primary">Add video</button></form></div>
+                {% endif %}<div class="resource-grid">{% for v in videos %}<article class="resource-card large"><span class="video-icon">▶</span>
+                    <div><span class="tag">{{v.class_name}} · {{v.subject_name}} · {{v.topic}}</span><h3>{{v.title}}</h3><p>{{v.description}}</p></div>
+                    <a class="btn primary tiny" href="{{v.youtube_url}}" target="_blank">Watch</a></article>{% else %}
+                    <div class="empty">No videos are available.</div>{% endfor %}</div>{% endblock %}

@@ -1,0 +1,49 @@
+{% extends 'base.html' %}
+{% block title %}Mark {{ submission.student }} ? Holiday Science Hub{% endblock %}
+{% block content %}
+<div class="page-head">
+    <div>
+        <span class="eyebrow">{{ submission.test_title }}</span>
+        <h1>{{ submission.student }}?s script.</h1>
+        <p>Review each response, attach the marking guide, and release the result when ready.</p>
+    </div>
+</div>
+
+<section class="panel form-panel">
+    <h2>Teacher?s marking guide</h2>
+    {% if guide %}
+        <p class="status ok">Guide attached: {{ guide.original_name }}</p>
+        <p>You may upload another PDF to replace this guide.</p>
+    {% else %}
+        <p>No marking guide has been attached yet.</p>
+    {% endif %}
+    <p>Choose a PDF marking guide below. You can also save marks without a guide, but students will not be able to request the completed-test download until a guide is attached.</p>
+</section>
+
+<form method="post" enctype="multipart/form-data" class="marking-sheet">
+    <article class="question-card">
+        <h2>Upload or replace marking guide</h2>
+        <label>Marking guide PDF
+            <input type="file" name="marking_guide" accept="application/pdf,.pdf">
+        </label>
+    </article>
+
+    {% for q in questions %}
+    <article class="question-card">
+        <div class="question-head">
+            <span>QUESTION {{ q.question_number }} ? {{ q.marks }} marks</span>
+            <label>Mark
+                <input name="mark_{{ q.id }}" type="number" min="0"
+                       max="{{ q.marks }}" step="0.5" value="0">
+            </label>
+        </div>
+        <h2>{{ q.question_text }}</h2>
+        <div class="student-answer">{{ q.answer_text or 'No typed answer supplied.' }}</div>
+        <label>Teacher comment
+            <textarea name="comment_{{ q.id }}" placeholder="Feedback for this question"></textarea>
+        </label>
+    </article>
+    {% endfor %}
+    <button class="btn primary" type="submit">Save marks and release result</button>
+</form>
+{% endblock %}

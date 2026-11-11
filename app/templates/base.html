@@ -1,0 +1,38 @@
+<!doctype html><html lang="en" data-theme="light"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>{% block title %}Holiday Coaching Hub{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static',filename='app.css') }}"></head><body><header class="topbar"><a class="brand" href="{{ url_for('home') }}">
+        <span class="mark">H</span><span><b>Holiday Science Hub</b></span></a><a class="public-about-link" href="{{ url_for('about') }}">About Us</a>
+        <button class="menu" onclick="document.body.classList.toggle('nav-open')">☰</button>{% if user %}<div class="top-actions">
+            <span class="role-chip">{{ user.role|upper }}</span><button class="theme" onclick="toggleTheme()">◐ Theme</button>
+            <a class="avatar" href="{{ url_for('change_password') }}">{{ user.full_name[0] }}</a></div>{% endif %}</header>{% if user %}<aside class="sidebar">
+                <nav><a class="{{ 'active' if current_path=='/dashboard' }}" href="{{ url_for('dashboard') }}">⌂ Overview</a>{% if user.role=='student' %}
+                    <a href="{{ url_for('library') }}">▣ My Library</a><a href="{{ url_for('timetable') }}">◷ Timetable</a>
+                    <a href="{{ url_for('tests') }}">✎ Assessments</a><a href="{{ url_for('videos') }}">▶ Video lessons</a>{% else %}{% if user.role=='admin' %}<a href="{{ url_for('students') }}">? Students</a>{% endif %}<a href="{{ url_for('library') }}">▣ Resources</a><a href="{{ url_for('timetable') }}">◷ Timetable</a><a href="{{ url_for('tests') }}">✎ Tests</a><a href="{{ url_for('marking') }}">✓ Marking queue</a><a href="{{ url_for('videos') }}">▶ Videos</a>{% if user.role=='admin' %}<a href="{{ url_for('test_download_requests') }}">? Test download approvals</a><a href="{{ url_for('manage_staff') }}">? Manage Staff</a><a href="{{ url_for('audit_page') }}">⌘ Audit log</a>{% endif %}{% endif %}<a href="{{ url_for('logout') }}">↪ Sign out</a></nav><div class="sidebar-foot"><span class="pulse"></span> Prototype environment<br><small>In-app notifications active</small></div></aside>{% endif %}<main class="page {% if user %}with-nav{% endif %}">{% with messages=get_flashed_messages(with_categories=true) %}{% for cat,msg in messages %}<div class="flash {{cat}}">{{msg}}</div>{% endfor %}{% endwith %}{% block content %}{% endblock %}</main>
+<footer class="mukago-ad-footer" aria-label="Mukago Group advertisement">
+    <div class="mukago-ad-heading">
+        <span class="mukago-ad-dot"></span>
+        MUKAGO GROUP
+        <span class="mukago-ad-label">CONTACT & ENQUIRIES</span>
+    </div>
+    <div class="mukago-ad-window">
+        <div class="mukago-ad-track">
+            <div class="mukago-ad-message">
+                <strong>MUKAGO GROUP</strong>
+                <span>Your success starts here!</span>
+                <span>For enquiries and partnerships:</span>
+                <a href="mailto:mukagogroup@gmail.com">? mukagogroup@gmail.com</a>
+                <a href="https://wa.me/256789635687" target="_blank" rel="noopener noreferrer">? WhatsApp: +256 789 635 687</a>
+                <span class="mukago-ad-star">?</span>
+            </div>
+            <div class="mukago-ad-message" aria-hidden="true">
+                <strong>MUKAGO GROUP</strong>
+                <span>Your success starts here!</span>
+                <span>For enquiries and partnerships:</span>
+                <span>? mukagogroup@gmail.com</span>
+                <span>? WhatsApp: +256 789 635 687</span>
+                <span class="mukago-ad-star">?</span>
+            </div>
+        </div>
+    </div>
+</footer>
+<script>function toggleTheme(){let t=document.documentElement.dataset.theme==='dark'?'light':'dark';document.documentElement.dataset.theme=t;localStorage.setItem('hub-theme',t)}document.documentElement.dataset.theme=localStorage.getItem('hub-theme')||'light';</script>{% block scripts %}{% endblock %}</body></html>

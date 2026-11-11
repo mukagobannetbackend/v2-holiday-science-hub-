@@ -1,0 +1,64 @@
+{% extends 'base.html' %}
+{% block title %}Sign in - Holiday Science Hub{% endblock %}
+
+{% block content %}
+<div class="auth-wrap">
+    <div class="auth-card">
+        <span class="eyebrow">HOLIDAY SCIENCE HUB</span>
+        <h1>Welcome back.</h1>
+        <p>Sign in with the credentials issued by your school.</p>
+
+        <form method="post">
+            <label>
+                Email
+                <input name="email" type="email" required
+                       placeholder="you@example.com"
+                       autocomplete="username">
+            </label>
+
+            <label>
+                Password
+                <div style="position:relative;">
+                    <input id="login-password" name="password"
+                           type="password" required
+                           autocomplete="current-password"
+                           style="width:100%; box-sizing:border-box; padding-right:75px;">
+
+                    <button type="button" id="toggle-password"
+                            aria-label="Show password"
+                            aria-pressed="false"
+                            style="position:absolute; right:10px; top:50%;
+                                   transform:translateY(-50%); border:0;
+                                   background:transparent; cursor:pointer;
+                                   padding:6px;">
+                        Show
+                    </button>
+                </div>
+            </label>
+
+            <button type="submit" class="btn primary wide">Sign in</button>
+        </form>
+    </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+    const password = document.getElementById('login-password');
+    const toggle = document.getElementById('toggle-password');
+
+    if (!password || !toggle) return;
+
+    toggle.addEventListener('click', function () {
+        const showing = password.type === 'password';
+
+        password.type = showing ? 'text' : 'password';
+        toggle.textContent = showing ? 'Hide' : 'Show';
+        toggle.setAttribute(
+            'aria-label',
+            showing ? 'Hide password' : 'Show password'
+        );
+        toggle.setAttribute('aria-pressed', String(showing));
+    });
+});
+</script>
+{% endblock %}

@@ -1,0 +1,62 @@
+{% extends 'base.html' %}
+{% block title %}Manage Staff ? Science Holiday Coaching Hub{% endblock %}
+{% block content %}
+<div class="page-head">
+    <div>
+        <span class="eyebrow">ADMINISTRATION</span>
+        <h1>Manage staff profiles</h1>
+        <p>Add your team, update their information and control what visitors can see.</p>
+    </div>
+    <a class="btn primary" href="{{ url_for('add_staff') }}">+ Add staff member</a>
+</div>
+
+<div class="panel staff-admin-panel">
+    <div class="section-head">
+        <h2>Staff directory</h2>
+        <a href="{{ url_for('about') }}" target="_blank" rel="noopener">View public About Us page ?</a>
+    </div>
+
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Staff member</th>
+                    <th>Position</th>
+                    <th>Display order</th>
+                    <th>Visibility</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for profile in profiles %}
+                <tr>
+                    <td>
+                        <strong>{{ profile.full_name }}</strong>
+                        {% if profile.email %}<br><small>{{ profile.email }}</small>{% endif %}
+                    </td>
+                    <td>{{ profile.job_title or 'Not specified' }}</td>
+                    <td>{{ profile.display_order }}</td>
+                    <td>
+                        {% if profile.is_published %}
+                        <span class="staff-status published">Published</span>
+                        {% else %}
+                        <span class="staff-status hidden">Hidden</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        <a class="btn tiny" href="{{ url_for('edit_staff', profile_id=profile.id) }}">Edit</a>
+                        <form class="inline-form" method="post"
+                              action="{{ url_for('delete_staff', profile_id=profile.id) }}"
+                              onsubmit="return confirm('Delete this staff profile permanently?');">
+                            <button class="btn tiny danger" type="submit">Delete</button>
+                        </form>
+                    </td>
+                </tr>
+                {% else %}
+                <tr><td colspan="5" class="empty">No staff profiles have been added yet.</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}

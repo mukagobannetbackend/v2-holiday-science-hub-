@@ -1,0 +1,329 @@
+{% extends 'base.html' %}
+{% block title %}{{ resource.title }} ? Learning Reader{% endblock %}
+
+{% block content %}
+<div class="reader-page">
+    <div class="reader-heading">
+        <div>
+            <span class="eyebrow">SCIENCE HOLIDAY COACHING HUB ? E-LIBRARY</span>
+            <h1>{{ resource.title }}</h1>
+            <p>{{ resource.class_name }} ? {{ resource.subject_name }} ? {{ resource.topic }}</p>
+        </div>
+        <a class="btn ghost" href="{{ url_for('library') }}">? Back to Library</a>
+    </div>
+
+    {% if mimetype.startswith('image/') %}
+        <div class="reader-image">
+            <img src="{{ url_for('view_resource', resource_id=resource.id) }}"
+                 alt="{{ resource.title }}">
+        </div>
+    {% else %}
+        <div class="reader-toolbar">
+            <div class="reader-toolbar-left">
+                <strong>Reading mode</strong>
+                <span id="pdf-status" role="status">Loading document...</span>
+            </div>
+
+            <div class="reader-controls">
+                <button class="btn tiny" id="reading-mode-toggle" type="button">
+                    Mobile Reading Mode
+                </button>
+                <button class="btn tiny" id="prev-page" type="button" disabled>Previous</button>
+                <span class="pdf-page-count">
+                    Page <span id="page-num">0</span> of <span id="page-count">0</span>
+                </span>
+                <button class="btn tiny" id="next-page" type="button" disabled>Next</button>
+                <button class="btn tiny" id="zoom-out" type="button" disabled>?</button>
+                <span id="zoom-level">100%</span>
+                <button class="btn tiny" id="zoom-in" type="button" disabled>+</button>
+            </div>
+        </div>
+
+        <div class="pdf-reader" id="pdf-reader">
+            <canvas id="pdf-canvas" aria-label="PDF document page"></canvas>
+        </div>
+
+        <div class="mobile-reading" id="mobile-reading-content" hidden
+             aria-live="polite">
+            <p class="mobile-reading-status">Preparing text...</p>
+        </div>
+
+        <div id="pdf-error" class="pdf-error" role="alert" hidden>
+            This document could not be displayed. Please refresh the page or contact the administrator.
+        </div>
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+{% if not mimetype.startswith('image/') %}
+<script src="{{ url_for('static', filename='pdfjs/pdf.min.js') }}"></script>
+<script>
+(function () {
+    const status = document.getElementById('pdf-status');
+    const errorBox = document.getElementById('pdf-error');
+    const canvas = document.getElementById('pdf-canvas');
+    const context = canvas.getContext('2d');
+    const pdfReader = document.getElementById('pdf-reader');
+    const mobileContent = document.getElementById('mobile-reading-content');
+    const modeToggle = document.getElementById('reading-mode-toggle');
+
+    let mobileMode = false;
+
+    const pageNumber = document.getElementById('page-num');
+    const pageCount = document.getElementById('page-count');
+    const zoomLabel = document.getElementById('zoom-level');
+
+    const previousButton = document.getElementById('prev-page');
+    const nextButton = document.getElementById('next-page');
+    const zoomOutButton = document.getElementById('zoom-out');
+    const zoomInButton = document.getElementById('zoom-in');
+
+    const pdfUrl = {{ url_for('view_resource', resource_id=resource.id)|tojson }};
+
+    let pdfDocument = null;
+    let currentPage = 1;
+    let zoom = 1;
+    let activeRender = null;
+    let resizeTimer = null;
+
+    function updateControls() {
+        previousButton.disabled = !pdfDocument || currentPage <= 1;
+        nextButton.disabled = !pdfDocument || currentPage >= pdfDocument.numPages;
+        zoomOutButton.disabled = mobileMode || !pdfDocument || zoom <= 0.6;
+        zoomInButton.disabled = mobileMode || !pdfDocument || zoom >= 2.4;
+        pageNumber.textContent = currentPage;
+        zoomLabel.textContent = Math.round(zoom * 100) + '%';
+    }
+
+    async function renderMobilePage() {
+        if (!pdfDocument || !mobileMode) return;
+
+        mobileContent.replaceChildren();
+
+        const loadingMessage = document.createElement('p');
+        loadingMessage.className = 'mobile-reading-status';
+        loadingMessage.textContent = 'Preparing page text...';
+        mobileContent.appendChild(loadingMessage);
+
+        try {
+            const page = await pdfDocument.getPage(currentPage);
+            const textContent = await page.getTextContent();
+
+            mobileContent.replaceChildren();
+
+            const heading = document.createElement('h2');
+            heading.textContent = 'Page ' + currentPage;
+            mobileContent.appendChild(heading);
+
+            let currentLine = '';
+            let previousY = null;
+            let lineCount = 0;
+
+            function addLine() {
+                const value = currentLine.trim();
+                if (!value) {
+                    currentLine = '';
+                    return;
+                }
+
+                const paragraph = document.createElement('p');
+                paragraph.textContent = value;
+                mobileContent.appendChild(paragraph);
+                currentLine = '';
+                lineCount++;
+            }
+
+            for (const item of textContent.items) {
+                if (!item.str) continue;
+
+                const y = item.transform ? item.transform[5] : null;
+
+                if (
+                    currentLine &&
+                    y !== null &&
+                    previousY !== null &&
+                    Math.abs(y - previousY) > 3
+                ) {
+                    addLine();
+                }
+
+                if (currentLine && !currentLine.endsWith(' ')) {
+                    currentLine += ' ';
+                }
+
+                currentLine += item.str;
+
+                if (item.hasEOL) {
+                    addLine();
+                }
+
+                previousY = y;
+            }
+
+            addLine();
+
+            if (lineCount === 0) {
+                const message = document.createElement('p');
+                message.textContent =
+                    'No selectable text was found on this page. ' +
+                    'This may be a scanned page and require OCR.';
+                mobileContent.appendChild(message);
+            }
+
+            status.textContent = 'Mobile reading mode';
+        } catch (error) {
+            console.error('PDF text extraction error:', error);
+            mobileContent.replaceChildren();
+
+            const message = document.createElement('p');
+            message.textContent =
+                'Could not extract text from this page. ' +
+                'Try Original PDF mode.';
+            mobileContent.appendChild(message);
+        }
+
+        updateControls();
+    }
+
+    async function renderPage() {
+        if (!pdfDocument) return;
+
+        if (mobileMode) {
+            await renderMobilePage();
+            return;
+        }
+
+        if (activeRender) {
+            activeRender.cancel();
+            activeRender = null;
+        }
+
+        try {
+            const page = await pdfDocument.getPage(currentPage);
+            const originalViewport = page.getViewport({ scale: 1 });
+            const availableWidth = Math.max(
+                240,
+                pdfReader.clientWidth -
+                parseFloat(getComputedStyle(pdfReader).paddingLeft) -
+                parseFloat(getComputedStyle(pdfReader).paddingRight)
+            );
+            const fitScale = Math.min(1, availableWidth / originalViewport.width);
+            const viewport = page.getViewport({ scale: fitScale * zoom });
+            const pixelRatio = window.devicePixelRatio || 1;
+
+            canvas.width = Math.floor(viewport.width * pixelRatio);
+            canvas.height = Math.floor(viewport.height * pixelRatio);
+            canvas.style.width = Math.floor(viewport.width) + 'px';
+            canvas.style.height = Math.floor(viewport.height) + 'px';
+
+            const renderContext = {
+                canvasContext: context,
+                viewport: viewport,
+                transform: pixelRatio !== 1
+                    ? [pixelRatio, 0, 0, pixelRatio, 0, 0]
+                    : null
+            };
+
+            activeRender = page.render(renderContext);
+            await activeRender.promise;
+            activeRender = null;
+
+            status.textContent = 'Document ready';
+            updateControls();
+        } catch (error) {
+            if (error && error.name === 'RenderingCancelledException') return;
+            console.error('PDF page rendering error:', error);
+            status.textContent = 'Unable to display this page';
+        }
+    }
+
+    modeToggle.addEventListener('click', async function () {
+        mobileMode = !mobileMode;
+
+        pdfReader.hidden = mobileMode;
+        mobileContent.hidden = !mobileMode;
+        modeToggle.textContent = mobileMode
+            ? 'Original PDF'
+            : 'Mobile Reading Mode';
+
+        if (activeRender) {
+            activeRender.cancel();
+            activeRender = null;
+        }
+
+        updateControls();
+
+        if (mobileMode) {
+            await renderMobilePage();
+        } else {
+            await renderPage();
+        }
+    });
+
+    previousButton.addEventListener('click', function () {
+        if (currentPage > 1) {
+            currentPage--;
+            renderPage();
+        }
+    });
+
+    nextButton.addEventListener('click', function () {
+        if (pdfDocument && currentPage < pdfDocument.numPages) {
+            currentPage++;
+            renderPage();
+        }
+    });
+
+    zoomOutButton.addEventListener('click', function () {
+        zoom = Math.max(0.6, Math.round((zoom - 0.2) * 10) / 10);
+        renderPage();
+        updateControls();
+    });
+
+    zoomInButton.addEventListener('click', function () {
+        zoom = Math.min(2.4, Math.round((zoom + 0.2) * 10) / 10);
+        renderPage();
+        updateControls();
+    });
+
+    window.addEventListener('resize', function () {
+        if (!pdfDocument) return;
+        clearTimeout(resizeTimer);
+        resizeTimer = setTimeout(function () {
+            renderPage();
+        }, 150);
+    });
+
+    async function openDocument() {
+        try {
+            if (!window.pdfjsLib) {
+                throw new Error('PDF.js library did not load.');
+            }
+
+            pdfjsLib.GlobalWorkerOptions.workerSrc =
+                {{ url_for('static', filename='pdfjs/pdf.worker.min.js')|tojson }};
+
+            const loadingTask = pdfjsLib.getDocument({
+                url: pdfUrl,
+                withCredentials: true
+            });
+
+            pdfDocument = await loadingTask.promise;
+            pageCount.textContent = pdfDocument.numPages;
+            currentPage = 1;
+            await renderPage();
+            updateControls();
+        } catch (error) {
+            console.error('PDF loading error:', error);
+            status.textContent = 'Document could not be loaded';
+            errorBox.hidden = false;
+        }
+    }
+
+    openDocument();
+})();
+</script>
+{% endif %}
+{% endblock %}

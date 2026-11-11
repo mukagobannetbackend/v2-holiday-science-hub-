@@ -1,0 +1,49 @@
+{% extends 'base.html' %}
+{% block title %}Test download approvals ? Holiday Science Hub{% endblock %}
+{% block content %}
+<div class="page-head">
+    <div>
+        <span class="eyebrow">ADMINISTRATION</span>
+        <h1>Test download requests.</h1>
+        <p>Review requests from students whose marked results have been released.</p>
+    </div>
+</div>
+
+<div class="cards-list">
+    {% for item in requests_list %}
+    <article class="test-card">
+        <div class="test-number">?</div>
+        <div>
+            <span class="tag">{{ item.status }} ? {{ item.test_title }}</span>
+            <h2>{{ item.student_name }}</h2>
+            <p>{{ item.student_email }}</p>
+            <p>Requested: {{ item.created_at }}</p>
+            {% if item.reason %}
+                <p><b>Reason:</b> {{ item.reason }}</p>
+            {% endif %}
+            {% if item.status == 'Approved' %}
+                <p>Approval expires: {{ item.expires_at }}</p>
+            {% elif item.status == 'Rejected' %}
+                <p>Decision date: {{ item.decided_at }}</p>
+            {% endif %}
+        </div>
+        {% if item.status == 'Pending' %}
+        <div class="action-row">
+            <form method="post"
+                  action="{{ url_for('decide_test_download', req_id=item.id, decision='approve') }}"
+                  onsubmit="return confirm('Approve this student download request?')">
+                <button class="btn primary" type="submit">Approve</button>
+            </form>
+            <form method="post"
+                  action="{{ url_for('decide_test_download', req_id=item.id, decision='reject') }}"
+                  onsubmit="return confirm('Reject this student download request?')">
+                <button class="btn ghost" type="submit">Reject</button>
+            </form>
+        </div>
+        {% endif %}
+    </article>
+    {% else %}
+    <div class="empty">There are no test download requests yet.</div>
+    {% endfor %}
+</div>
+{% endblock %}

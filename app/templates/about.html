@@ -1,0 +1,86 @@
+{% extends 'base.html' %}
+{% block title %}About Us ? Science Holiday Coaching Hub{% endblock %}
+{% block content %}
+<section class="about-hero">
+    <span class="eyebrow">SCIENCE HOLIDAY COACHING HUB</span>
+    <h1>Meet the people behind your learning.</h1>
+    <p>Our team is committed to helping students build confidence, strengthen their understanding and achieve their academic goals.</p>
+</section>
+
+<section class="about-section">
+    <div class="section-head">
+        <div>
+            <span class="eyebrow">OUR PEOPLE</span>
+            <h2>Our staff and educators</h2>
+        </div>
+    </div>
+
+    <div class="staff-profile-grid">
+        {% for profile in profiles %}
+        <article class="staff-profile-card">
+            {% if profile.photo_filename %}
+            <img class="staff-profile-photo"
+                 src="{{ url_for('staff_photo', filename=profile.photo_filename) }}"
+                 alt="Photograph of {{ profile.full_name }}">
+            {% else %}
+            <div class="staff-profile-placeholder" aria-label="No photograph available">
+                {{ profile.full_name[:1]|upper }}
+            </div>
+            {% endif %}
+
+            <div class="staff-profile-content">
+                <h3>{{ profile.full_name }}</h3>
+                {% if profile.job_title %}<p class="staff-job-title">{{ profile.job_title }}</p>{% endif %}
+
+                {% if profile.qualifications %}
+                <div class="staff-detail">
+                    <strong>Qualifications</strong>
+                    <p>{{ profile.qualifications }}</p>
+                </div>
+                {% endif %}
+
+                {% if profile.institution %}
+                <div class="staff-detail">
+                    <strong>Institution</strong>
+                    <p>{{ profile.institution }}</p>
+                </div>
+                {% endif %}
+
+                {% if profile.experience %}
+                <div class="staff-detail">
+                    <strong>Experience</strong>
+                    <p>{{ profile.experience }}</p>
+                </div>
+                {% endif %}
+
+                {% if profile.bio %}
+                <div class="staff-detail">
+                    <strong>About</strong>
+                    <p>{{ profile.bio }}</p>
+                </div>
+                {% endif %}
+
+                {% if profile.email or profile.phone or profile.whatsapp %}
+                <div class="staff-contact">
+                    <strong>Contact</strong>
+                    {% if profile.email %}<a href="mailto:{{ profile.email }}">{{ profile.email }}</a>{% endif %}
+                    {% if profile.phone %}<a href="tel:{{ profile.phone }}">{{ profile.phone }}</a>{% endif %}
+                    {% if profile.whatsapp %}
+                    <a target="_blank" rel="noopener"
+                       href="https://wa.me/{{ profile.whatsapp|replace('+','')|replace(' ','')|replace('-','') }}">
+                       WhatsApp: {{ profile.whatsapp }}
+                    </a>
+                    {% endif %}
+                </div>
+                {% endif %}
+            </div>
+        </article>
+        {% else %}
+        <div class="panel about-empty">
+            <h2>Our team profiles are coming soon.</h2>
+            <p>We are preparing information about our educators and staff. Please check back soon.</p>
+        </div>
+        {% endfor %}
+    </div>
+</section>
+{% endblock %}

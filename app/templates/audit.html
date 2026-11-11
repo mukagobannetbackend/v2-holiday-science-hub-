@@ -1,0 +1,8 @@
+{% extends 'base.html' %}{% block title %}Audit log · Holiday Coaching Hub{% endblock %}{% block content %}
+<div class="page-head"><div><span class="eyebrow">ACCOUNTABILITY</span><h1>Audit log.</h1>
+    <p>Payment decisions, access events, uploads, submissions and marking changes.</p></div></div>
+    <div class="table-wrap"><table><thead><tr><th>Time</th><th>Actor</th><th>Action</th>
+        <th>Target</th><th>Details</th></tr></thead><tbody>{% for x in logs %}<tr>
+            <td class="mono">{{x.created_at}}</td><td>{{x.actor or 'System'}}</td><td>
+                <span class="tag">{{x.action}}</span></td><td>{{x.target_type}} {{x.target_id}}</td>
+                <td>{{x.details}}</td></tr>{% endfor %}</tbody></table></div>{% endblock %}

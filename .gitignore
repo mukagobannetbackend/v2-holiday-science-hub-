@@ -1,0 +1,34 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+.env
+instance/*.db
+instance/uploads/*
+!instance/.gitkeep
+
+# Database files and backups
+instance/*.db*
+instance/*.sqlite*
+instance/*.sqlite3*
+
+# Development backup files
+/app/*backup*
+/app/*.before-*
+/app/*.pre-*
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Local project backups
+backups/
+
+# Temporary code and database backups
+*.bak
+*.backup-*
+*.before-*
+*-before-*.py
+*-before-*.html
+instance/*.bak

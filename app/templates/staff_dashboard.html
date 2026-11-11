@@ -1,0 +1,99 @@
+{% extends 'base.html' %}
+{% block title %}Staff overview ? Holiday Science Hub{% endblock %}
+
+{% block content %}
+<div class="page-head">
+    <div>
+        <span class="eyebrow">{{ user.role|upper }} CONSOLE</span>
+        <h1>Good morning, {{ user.full_name.split()[0] }}.</h1>
+        <p>The hub is ready for today's learning operations.</p>
+    </div>
+    <a class="btn primary" href="{{ url_for('library') }}">+ Add resource</a>
+    {% if user.role == 'admin' %}
+        <a class="btn" href="{{ url_for('manage_staff') }}">Manage Staff</a>
+    {% endif %}
+</div>
+
+{% if user.role == 'admin' %}
+<div class="metric-grid">
+    <div><span>STUDENTS</span><strong>{{ stats.students }}</strong><small>in register</small></div>
+    <div class="attention"><span>PENDING PAYMENTS</span><strong>{{ stats.pending }}</strong><small>need review</small></div>
+    <div><span>APPROVED / PAID</span><strong>{{ stats.approved }}</strong><small>access enabled</small></div>
+    <div><span>PENDING MARKING</span><strong>{{ stats.marking }}</strong><small>scripts in queue</small></div>
+</div>
+{% else %}
+<div class="metric-grid">
+    <div><span>PENDING MARKING</span><strong>{{ stats.marking }}</strong><small>scripts awaiting review</small></div>
+</div>
+{% endif %}
+
+<section class="dashboard-grid">
+    <div class="main-col">
+        {% if user.role == 'admin' %}
+        <div class="section-head">
+            <h2>Payment approval queue</h2>
+            <a href="{{ url_for('students') }}">Student register ?</a>
+        </div>
+        <div class="table-wrap">
+            <table>
+                <thead><tr><th>Student</th><th>Class</th><th>Reference</th><th>Action</th></tr></thead>
+                <tbody>
+                    {% for p in pending %}
+                    <tr>
+                        <td><b>{{ p.full_name }}</b></td>
+                        <td>{{ p.class_name }}</td>
+                        <td class="mono">{{ p.reference }}</td>
+                        <td>
+                            <form method="post" action="{{ url_for('approve_student', student_id=p.student_id) }}">
+                                <button class="btn tiny" type="submit">Approve</button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% else %}
+                    <tr><td colspan="4" class="empty">No pending approvals.</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% endif %}
+
+        <div class="panel form-panel">
+            <h2>Publish an announcement</h2>
+            <form method="post" action="{{ url_for('create_announcement') }}" class="form-grid">
+                <label>Title<input name="title" required></label>
+                <label>Target level
+                    <select name="target_level">
+                        <option value="">All students</option>
+                        <option>O-Level</option><option>A-Level</option>
+                    </select>
+                </label>
+                <label>Target class
+                    <select name="target_class_id">
+                        <option value="">All classes</option>
+                        {% for c in classes %}
+                        <option value="{{ c.id }}">{{ c.name }}</option>
+                        {% endfor %}
+                    </select>
+                </label>
+                <label class="full">Message<textarea name="body" required></textarea></label>
+                <button class="btn primary" type="submit">Publish notice</button>
+            </form>
+        </div>
+    </div>
+
+    <aside class="side-col">
+        <div class="panelamber">
+            <span class="eyebrow">UP NEXT</span>
+            <h2>Lessons on the horizon.</h2>
+            {% for l in lessons %}
+            <div class="mini-row">
+                <b>{{ l.title }}</b>
+                <small>{{ l.class_name }} ? {{ l.starts_at }}</small>
+            </div>
+            {% else %}
+            <p>No scheduled lessons.</p>
+            {% endfor %}
+        </div>
+    </aside>
+</section>
+{% endblock %}

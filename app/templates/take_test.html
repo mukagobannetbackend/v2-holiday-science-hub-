@@ -1,0 +1,70 @@
+{% extends 'base.html' %}
+{% block title %}{{ test.title }} ? Holiday Science Hub{% endblock %}
+{% block content %}
+<div class="page-head">
+    <div>
+        <span class="eyebrow">{{ test.class_name }} ? {{ test.subject_name }}</span>
+        <h1>{{ test.title }}</h1>
+        <p>{{ test.instructions }}</p>
+    </div>
+    <span class="status {{ 'ok' if submission and submission.status=='Submitted' else 'warn' }}">
+        {{ submission.status if submission else 'Not started' }}
+    </span>
+</div>
+
+<form method="post" class="answer-sheet">
+    {% for q in questions %}
+    <article class="question-card">
+        <div class="question-head">
+            <span>QUESTION {{ q.question_number }}</span>
+            <b>{{ q.marks }} marks</b>
+        </div>
+        <h2>{{ q.question_text }}</h2>
+        <textarea name="answer_{{ q.id }}"
+            {% if submission and submission.status=='Submitted' %}disabled{% endif %}
+            placeholder="Write your answer here...">{{ answers.get(q.id, '') }}</textarea>
+    </article>
+    {% endfor %}
+
+    {% if not submission or submission.status != 'Submitted' %}
+    <div class="sticky-actions">
+        <button class="btn ghost" name="action" value="draft">Save draft</button>
+        <button class="btn primary" name="action" value="submit"
+            onclick="return confirm('Submit and lock this script?')">Submit script</button>
+    </div>
+    {% else %}
+    <div class="panel success-panel">
+        Your script was submitted on {{ submission.submitted_at }}. It is locked until a teacher reopens it.
+    </div>
+    {% endif %}
+</form>
+
+{% if test_download_ready %}
+<section class="panel form-panel">
+    <h2>Completed marked test</h2>
+    <p>Your teacher has released your results and attached the marking guide. You can now request permission to download your completed test report and marking guide.</p>
+
+    {% if test_download_request and test_download_request.status == 'Pending' %}
+        <p class="status warn">Your download request is awaiting admin approval.</p>
+    {% elif test_download_request and test_download_request.status == 'Approved' and test_download_request.expires_at and test_download_request.expires_at > current_time %}
+        <p class="status ok">Your request has been approved.</p>
+        <a class="btn primary" href="{{ url_for('download_marked_test', submission_id=submission.id) }}">Download completed test (ZIP)</a>
+    {% elif test_download_request and test_download_request.status == 'Rejected' %}
+        <p class="status warn">Your previous request was rejected. You may submit a new request.</p>
+        <form method="post" action="{{ url_for('request_test_download', submission_id=submission.id) }}">
+            <label>Reason (optional)
+                <textarea name="reason" placeholder="Why do you need the completed test?"></textarea>
+            </label>
+            <button class="btn primary" type="submit">Request download permission</button>
+        </form>
+    {% else %}
+        <form method="post" action="{{ url_for('request_test_download', submission_id=submission.id) }}">
+            <label>Reason (optional)
+                <textarea name="reason" placeholder="Why do you need the completed test?"></textarea>
+            </label>
+            <button class="btn primary" type="submit">Request download permission</button>
+        </form>
+    {% endif %}
+</section>
+{% endif %}
+{% endblock %}
