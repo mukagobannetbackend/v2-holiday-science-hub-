@@ -868,3 +868,176 @@ def test_second_student_device_takes_over_and_first_can_login_again(app):
     assert response_b.status_code == 302
     assert '/login' in response_b.headers['Location']
 
+
+def test_bulk_suspend_updates_selected_students_and_audits_each(client):
+    login(client, 'admin@holidayhub.local', 'Admin@123')
+
+    with client.application.app_context():
+        db = get_db()
+        student_ids = [
+            db.execute(
+                "SELECT id FROM users WHERE email=?",
+                (email,)
+            ).fetchone()['id']
+            for email in (
+                'student@holidayhub.local',
+                'pending@holidayhub.local'
+            )
+        ]
+
+    response = client.post(
+        '/students/bulk-action',
+        data={
+            'action': 'suspend',
+            'student_ids': [str(value) for value in student_ids]
+        },
+        follow_redirects=True
+    )
+    assert response.status_code == 200
+
+    with client.application.app_context():
+        db = get_db()
+        for student_id in student_ids:
+            account = db.execute(
+                "SELECT is_active FROM users WHERE id=?",
+                (student_id,)
+            ).fetchone()
+            assert account['is_active'] == 0
+
+        audit_count = db.execute(
+            """
+            SELECT COUNT(*) FROM audit_logs
+            WHERE action='account_suspended'
+              AND details='Performed through bulk student management.'
+            """
+        ).fetchone()[0]
+        assert audit_count == 2
+
+
+def test_bulk_restore_only_reactivates_students_with_approved_payment(client):
+    login(client, 'admin@holidayhub.local', 'Admin@123')
+
+    with client.application.app_context():
+        db = get_db()
+        approved_id = db.execute(
+            "SELECT id FROM users WHERE email='student@holidayhub.local'"
+        ).fetchone()['id']
+        pending_id = db.execute(
+            "SELECT id FROM users WHERE email='pending@holidayhub.local'"
+        ).fetchone()['id']
+
+        db.execute(
+            "UPDATE users SET is_active=0 WHERE id IN (?, ?)",
+            (approved_id, pending_id)
+        )
+        db.commit()
+
+    response = client.post(
+        '/students/bulk-action',
+        data={
+            'action': 'restore',
+            'student_ids': [str(approved_id), str(pending_id)]
+        },
+        follow_redirects=True
+    )
+    assert response.status_code == 200
+    assert b'1 student account(s) restored' in response.data
+    assert b'1 account(s) were not restored' in response.data
+
+    with client.application.app_context():
+        db = get_db()
+        approved = db.execute(
+            "SELECT is_active FROM users WHERE id=?",
+            (approved_id,)
+        ).fetchone()
+        pending = db.execute(
+            "SELECT is_active FROM users WHERE id=?",
+            (pending_id,)
+        ).fetchone()
+
+        assert approved['is_active'] == 1
+        assert pending['is_active'] == 0
+
+
+def test_bulk_hide_and_show_do_not_change_account_status(client):
+    login(client, 'admin@holidayhub.local', 'Admin@123')
+
+    with client.application.app_context():
+        db = get_db()
+        student_id = db.execute(
+            "SELECT id FROM users WHERE email='student@holidayhub.local'"
+        ).fetchone()['id']
+
+        db.execute(
+            "UPDATE users SET is_active=0 WHERE id=?",
+            (student_id,)
+        )
+        db.commit()
+
+    hidden_response = client.post(
+        '/students/bulk-action',
+        data={'action': 'hide', 'student_ids': str(student_id)},
+        follow_redirects=True
+    )
+    assert hidden_response.status_code == 200
+
+    with client.application.app_context():
+        db = get_db()
+        account = db.execute(
+            "SELECT is_active, is_hidden FROM users WHERE id=?",
+            (student_id,)
+        ).fetchone()
+        assert account['is_active'] == 0
+        assert account['is_hidden'] == 1
+
+    shown_response = client.post(
+        '/students/bulk-action',
+        data={'action': 'show', 'student_ids': str(student_id)},
+        follow_redirects=True
+    )
+    assert shown_response.status_code == 200
+
+    with client.application.app_context():
+        account = get_db().execute(
+            "SELECT is_active, is_hidden FROM users WHERE id=?",
+            (student_id,)
+        ).fetchone()
+        assert account['is_active'] == 0
+        assert account['is_hidden'] == 0
+
+
+def test_bulk_action_invalid_selection_makes_no_partial_changes(client):
+    login(client, 'admin@holidayhub.local', 'Admin@123')
+
+    with client.application.app_context():
+        student_id = get_db().execute(
+            "SELECT id FROM users WHERE email='student@holidayhub.local'"
+        ).fetchone()['id']
+
+    response = client.post(
+        '/students/bulk-action',
+        data={
+            'action': 'suspend',
+            'student_ids': [str(student_id), '999999']
+        },
+        follow_redirects=True
+    )
+    assert response.status_code == 200
+    assert b'No changes were made' in response.data
+
+    with client.application.app_context():
+        account = get_db().execute(
+            "SELECT is_active FROM users WHERE id=?",
+            (student_id,)
+        ).fetchone()
+        assert account['is_active'] == 1
+
+
+def test_non_admin_cannot_use_bulk_student_management(client):
+    login(client, 'student@holidayhub.local', 'Student@123')
+
+    response = client.post(
+        '/students/bulk-action',
+        data={'action': 'suspend', 'student_ids': '4'}
+    )
+    assert response.status_code == 403

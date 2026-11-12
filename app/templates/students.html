@@ -1,4 +1,4 @@
-{% extends 'base.html' %}
+﻿{% extends 'base.html' %}
 {% block title %}Students - Holiday Coaching Hub{% endblock %}
 {% block content %}
 
@@ -78,17 +78,67 @@
 </div>
 
 <div class="section-head">
-    <h2>Registered students</h2>
+    <div>
+        <span class="eyebrow">STUDENT MANAGEMENT</span>
+        <h2>{{ 'Hidden students' if viewing_hidden else 'Registered students' }}</h2>
+        <p class="muted">
+            {% if viewing_hidden %}
+            These students are hidden from the normal register. Their accounts and records remain intact.
+            {% else %}
+            Select individual students or select everyone in this list to manage accounts together.
+            {% endif %}
+        </p>
+    </div>
+
+    {% if viewing_hidden %}
+    <a class="btn ghost" href="{{ url_for('students') }}">Back to registered students</a>
+    {% else %}
+    <a class="btn ghost" href="{{ url_for('students', view='hidden') }}">
+        Hidden students ({{ hidden_count }})
+    </a>
+    {% endif %}
+</div>
+
+<div class="panel" style="margin-bottom:16px;">
+    <form id="bulkStudentForm" method="post" action="{{ url_for('bulk_student_action') }}">
+        <div class="form-grid">
+            <label>
+                Bulk account action
+                <select name="action" required>
+                    <option value="">Choose an action</option>
+                    {% if viewing_hidden %}
+                    <option value="show">Show selected in register</option>
+                    {% else %}
+                    <option value="suspend">Suspend selected accounts</option>
+                    <option value="restore">Restore selected accounts</option>
+                    <option value="hide">Hide selected from this register</option>
+                    {% endif %}
+                </select>
+            </label>
+
+            <div style="display:flex;align-items:end;gap:12px;flex-wrap:wrap;">
+                <button class="btn primary" type="submit">Apply to selected</button>
+                <span class="muted" id="selectedStudentCount">0 students selected</span>
+            </div>
+        </div>
+    </form>
 </div>
 
 <div class="table-wrap">
     <table>
         <thead>
             <tr>
+                <th>
+                    <label style="display:flex;align-items:center;gap:7px;">
+                        <input type="checkbox" id="selectAllStudents">
+                        All
+                    </label>
+                </th>
                 <th>Student</th>
                 <th>Class</th>
                 <th>Payment</th>
                 <th>Account</th>
+                <th>Visibility</th>
                 <th>Action</th>
             </tr>
         </thead>
@@ -96,26 +146,56 @@
             {% for s in students %}
             <tr>
                 <td>
+                    <input
+                        type="checkbox"
+                        name="student_ids"
+                        value="{{ s.id }}"
+                        form="bulkStudentForm"
+                        class="student-select"
+                        aria-label="Select {{ s.full_name }}">
+                </td>
+
+                <td>
                     <b>{{ s.full_name }}</b>
                     <small>{{ s.email }} ? {{ s.admission_no or 'No admission number' }}</small>
                     <small>{{ s.phone or '' }}</small>
                 </td>
+
                 <td><span class="tag">{{ s.class_name or 'Unassigned' }}</span></td>
+
                 <td>
-                    <span class="status {{ 'ok' if s.payment_status == 'Approved/Paid' else 'warn' }}">
+                    <span class="status {{ 'ok' if s.payment_status in ['Approved/Paid', 'Approved'] else 'warn' }}">
                         {{ s.payment_status or 'No payment' }}
                     </span>
                     <small>{{ s.reference or '' }}</small>
                 </td>
+
                 <td>{{ 'Active' if s.is_active else 'Inactive / Suspended' }}</td>
+
+                <td>{{ 'Hidden' if s.is_hidden else 'Visible' }}</td>
+
                 <td>
+                    {% if viewing_hidden %}
+                    <form method="post" action="{{ url_for('bulk_student_action') }}">
+                        <input type="hidden" name="action" value="show">
+                        <input type="hidden" name="student_ids" value="{{ s.id }}">
+                        <button class="btn tiny" type="submit">Show in register</button>
+                    </form>
+                    {% endif %}
+
                     {% if s.payment_status == 'Pending' %}
                     <form method="post" action="{{ url_for('approve_student', student_id=s.id) }}">
                         <button class="btn tiny" type="submit">Approve payment</button>
                     </form>
-                    {% elif s.payment_status == 'Approved/Paid' and s.is_active %}
+                    {% elif s.payment_status in ['Approved/Paid', 'Approved'] and s.is_active %}
                     <form method="post" action="{{ url_for('suspend_student', student_id=s.id) }}">
                         <button class="btn tiny danger" type="submit">Suspend</button>
+                    </form>
+                    {% elif s.payment_status in ['Approved/Paid', 'Approved'] and not s.is_active %}
+                    <form method="post" action="{{ url_for('bulk_student_action') }}">
+                        <input type="hidden" name="action" value="restore">
+                        <input type="hidden" name="student_ids" value="{{ s.id }}">
+                        <button class="btn tiny" type="submit">Restore account</button>
                     </form>
                     {% else %}
                     <span class="muted">No pending payment</span>
@@ -124,11 +204,63 @@
             </tr>
             {% else %}
             <tr>
-                <td colspan="5" class="empty">No students have been registered yet.</td>
+                <td colspan="7" class="empty">
+                    {% if viewing_hidden %}
+                    There are no hidden students.
+                    {% else %}
+                    No students have been registered yet.
+                    {% endif %}
+                </td>
             </tr>
             {% endfor %}
         </tbody>
     </table>
 </div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+    const selectAll = document.getElementById('selectAllStudents');
+    const studentCheckboxes = Array.from(
+        document.querySelectorAll('.student-select')
+    );
+    const selectedCount = document.getElementById('selectedStudentCount');
+
+    function updateSelectedCount() {
+        const selected = studentCheckboxes.filter(box => box.checked).length;
+        selectedCount.textContent = selected + (
+            selected === 1 ? ' student selected' : ' students selected'
+        );
+
+        selectAll.checked = studentCheckboxes.length > 0 &&
+            selected === studentCheckboxes.length;
+
+        selectAll.indeterminate = selected > 0 &&
+            selected < studentCheckboxes.length;
+    }
+
+    selectAll.addEventListener('change', function () {
+        studentCheckboxes.forEach(box => {
+            box.checked = selectAll.checked;
+        });
+        updateSelectedCount();
+    });
+
+    studentCheckboxes.forEach(box => {
+        box.addEventListener('change', updateSelectedCount);
+    });
+
+    document.getElementById('bulkStudentForm').addEventListener('submit', function (event) {
+        const selected = studentCheckboxes.filter(box => box.checked).length;
+        const action = this.querySelector('[name="action"]').value;
+
+        if (selected === 0 || !action) {
+            event.preventDefault();
+            alert('Select at least one student and choose an action.');
+        }
+    });
+
+    updateSelectedCount();
+});
+</script>
 
 {% endblock %}

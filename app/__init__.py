@@ -183,6 +183,9 @@ def create_app(test_config=None):
     @app.get('/students')
     @admin_required
     def students():
+        viewing_hidden = request.args.get('view') == 'hidden'
+        hidden_filter = 1 if viewing_hidden else 0
+
         student_rows = rows("""
             SELECT u.*, sp.admission_no, c.name AS class_name,
                    c.level, p.status AS payment_status,
@@ -196,12 +199,22 @@ def create_app(test_config=None):
                 ORDER BY id DESC LIMIT 1
             )
             WHERE u.role = 'student'
+              AND u.is_hidden = ?
             ORDER BY u.full_name
-        """)
+        """, (hidden_filter,))
+
+        hidden_count = row("""
+            SELECT COUNT(*) AS total
+            FROM users
+            WHERE role = 'student' AND is_hidden = 1
+        """)['total']
+
         return render_template(
             'students.html',
             students=student_rows,
-            classes=rows("SELECT id, level, name FROM classes ORDER BY id")
+            classes=rows("SELECT id, level, name FROM classes ORDER BY id"),
+            viewing_hidden=viewing_hidden,
+            hidden_count=hidden_count
         )
 
     @app.post('/students/register')
@@ -399,6 +412,133 @@ def create_app(test_config=None):
 
         flash('Student account suspended.', 'success')
         return redirect(url_for('students'))
+
+    @app.post('/students/bulk-action')
+    @admin_required
+    def bulk_student_action():
+        db = get_db()
+        action = (request.form.get('action') or '').strip().lower()
+        raw_ids = request.form.getlist('student_ids')
+
+        allowed_actions = {'suspend', 'restore', 'hide', 'show'}
+        if action not in allowed_actions:
+            flash('Invalid bulk action.', 'error')
+            return redirect(url_for('students'))
+
+        if not raw_ids:
+            flash('Select at least one student first.', 'error')
+            return redirect(url_for('students'))
+
+        try:
+            student_ids = list(dict.fromkeys(int(value) for value in raw_ids))
+            if any(student_id <= 0 for student_id in student_ids):
+                raise ValueError
+        except (TypeError, ValueError):
+            flash('The student selection contains an invalid ID.', 'error')
+            return redirect(url_for('students'))
+
+        # Validate every selected account before changing any account.
+        valid_ids = []
+        for student_id in student_ids:
+            student = row(
+                "SELECT id FROM users WHERE id = ? AND role = 'student'",
+                (student_id,)
+            )
+            if not student:
+                flash(
+                    'No changes were made. One or more selected student accounts were not found.',
+                    'error'
+                )
+                return redirect(url_for('students'))
+            valid_ids.append(student_id)
+
+        actor_id = current_user()['id']
+        changed_ids = []
+        skipped = 0
+
+        try:
+            for student_id in valid_ids:
+                if action == 'suspend':
+                    db.execute(
+                        "UPDATE users SET is_active = 0 "
+                        "WHERE id = ? AND role = 'student'",
+                        (student_id,)
+                    )
+                    changed_ids.append(student_id)
+
+                elif action == 'restore':
+                    payment = row(
+                        """
+                        SELECT status FROM payments
+                        WHERE student_id = ?
+                        ORDER BY id DESC LIMIT 1
+                        """,
+                        (student_id,)
+                    )
+                    if payment and payment['status'] in ('Approved/Paid', 'Approved'):
+                        db.execute(
+                            "UPDATE users SET is_active = 1 "
+                            "WHERE id = ? AND role = 'student'",
+                            (student_id,)
+                        )
+                        changed_ids.append(student_id)
+                    else:
+                        skipped += 1
+
+                elif action == 'hide':
+                    db.execute(
+                        "UPDATE users SET is_hidden = 1 "
+                        "WHERE id = ? AND role = 'student'",
+                        (student_id,)
+                    )
+                    changed_ids.append(student_id)
+
+                elif action == 'show':
+                    db.execute(
+                        "UPDATE users SET is_hidden = 0 "
+                        "WHERE id = ? AND role = 'student'",
+                        (student_id,)
+                    )
+                    changed_ids.append(student_id)
+
+            db.commit()
+
+        except Exception:
+            db.rollback()
+            raise
+
+        audit_actions = {
+            'suspend': 'account_suspended',
+            'restore': 'account_restored',
+            'hide': 'student_hidden',
+            'show': 'student_shown'
+        }
+
+        for student_id in changed_ids:
+            audit(
+                actor_id,
+                audit_actions[action],
+                'student',
+                str(student_id),
+                'Performed through bulk student management.'
+            )
+
+        if action == 'restore' and skipped:
+            flash(
+                f'{len(changed_ids)} student account(s) restored. '
+                f'{skipped} account(s) were not restored because payment is not approved.',
+                'success' if changed_ids else 'error'
+            )
+        elif changed_ids:
+            flash(
+                f'{len(changed_ids)} student account(s) updated successfully.',
+                'success'
+            )
+        else:
+            flash('No student accounts were changed.', 'error')
+
+        return redirect(url_for('students'))
+
     @app.post('/announcements')
     @staff_required
     def create_announcement():

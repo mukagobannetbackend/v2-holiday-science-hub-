@@ -370,6 +370,29 @@ def init_db():
     else:
         db.connection.executescript(schema)
 
+    # Safe migration: add student visibility control to existing databases.
+    if is_postgres:
+        column = db.execute(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_name = 'users'
+              AND column_name = 'is_hidden'
+            """
+        ).fetchone()
+        has_hidden_column = column is not None
+    else:
+        columns = db.execute("PRAGMA table_info(users)").fetchall()
+        has_hidden_column = any(
+            column["name"] == "is_hidden" for column in columns
+        )
+
+    if not has_hidden_column:
+        db.execute(
+            "ALTER TABLE users "
+            "ADD COLUMN is_hidden INTEGER NOT NULL DEFAULT 0"
+        )
+
     db.execute(
         """
         CREATE TABLE IF NOT EXISTS active_sessions (
