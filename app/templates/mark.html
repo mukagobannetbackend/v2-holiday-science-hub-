@@ -1,23 +1,61 @@
 {% extends 'base.html' %}
-{% block title %}Mark {{ submission.student }} ? Holiday Science Hub{% endblock %}
+{% block title %}Mark {{ submission.student }} - Science Holiday Coaching Hub{% endblock %}
+
 {% block content %}
 <div class="page-head">
     <div>
         <span class="eyebrow">{{ submission.test_title }}</span>
-        <h1>{{ submission.student }}?s script.</h1>
-        <p>Review each response, attach the marking guide, and release the result when ready.</p>
+        <h1>{{ submission.student }}'s script</h1>
+        <p>Review the uploaded script and typed answers before marking.</p>
     </div>
+    <a class="btn ghost" href="{{ url_for('marking') }}">Back to marking queue</a>
 </div>
 
+{% if script_file %}
+<section class="panel script-viewer-panel">
+    <h2>Student's uploaded handwritten script</h2>
+    <p class="muted">Original upload - viewing only. Your annotations will be saved separately.</p>
+
+    {% set extension = script_file.rsplit('.', 1)[-1].lower() %}
+
+    {% if extension in ['png', 'jpg', 'jpeg'] %}
+        <div class="script-image-viewer">
+            <img src="{{ script_url }}" alt="Uploaded handwritten student script">
+        </div>
+    {% elif extension == 'pdf' %}
+        <div class="script-pdf-toolbar">
+            <button class="btn tiny" id="script-prev" type="button" disabled>Previous</button>
+            <span>Page <b id="script-page">1</b> of <b id="script-pages">1</b></span>
+            <button class="btn tiny" id="script-next" type="button" disabled>Next</button>
+            <button class="btn tiny" id="script-zoom-out" type="button">-</button>
+            <span id="script-zoom">100%</span>
+            <button class="btn tiny" id="script-zoom-in" type="button">+</button>
+        </div>
+        <div class="script-pdf-stage">
+            <canvas id="script-pdf-canvas"></canvas>
+        </div>
+        <p id="script-pdf-status" class="muted" role="status">Loading script...</p>
+        <div id="script-pdf-error" class="flash error" hidden>
+            The PDF could not be displayed. Please refresh and try again.
+        </div>
+    {% endif %}
+</section>
+{% else %}
+<section class="panel">
+    <h2>No handwritten script uploaded</h2>
+    <p>The student submitted typed answers only.</p>
+</section>
+{% endif %}
+
 <section class="panel form-panel">
-    <h2>Teacher?s marking guide</h2>
+    <h2>Teacher's marking guide</h2>
     {% if guide %}
         <p class="status ok">Guide attached: {{ guide.original_name }}</p>
         <p>You may upload another PDF to replace this guide.</p>
     {% else %}
         <p>No marking guide has been attached yet.</p>
     {% endif %}
-    <p>Choose a PDF marking guide below. You can also save marks without a guide, but students will not be able to request the completed-test download until a guide is attached.</p>
+    <p>Choose a PDF marking guide below.</p>
 </section>
 
 <form method="post" enctype="multipart/form-data" class="marking-sheet">
@@ -31,7 +69,7 @@
     {% for q in questions %}
     <article class="question-card">
         <div class="question-head">
-            <span>QUESTION {{ q.question_number }} ? {{ q.marks }} marks</span>
+            <span>QUESTION {{ q.question_number }} - {{ q.marks }} marks</span>
             <label>Mark
                 <input name="mark_{{ q.id }}" type="number" min="0"
                        max="{{ q.marks }}" step="0.5" value="0">
@@ -46,4 +84,117 @@
     {% endfor %}
     <button class="btn primary" type="submit">Save marks and release result</button>
 </form>
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+{% if script_file and script_file.rsplit('.', 1)[-1].lower() == 'pdf' %}
+<script src="{{ url_for('static', filename='pdfjs/pdf.min.js') }}"></script>
+<script>
+(function () {
+    const canvas = document.getElementById('script-pdf-canvas');
+    const context = canvas.getContext('2d');
+    const status = document.getElementById('script-pdf-status');
+    const errorBox = document.getElementById('script-pdf-error');
+    const previous = document.getElementById('script-prev');
+    const next = document.getElementById('script-next');
+    const zoomOut = document.getElementById('script-zoom-out');
+    const zoomIn = document.getElementById('script-zoom-in');
+    const pageLabel = document.getElementById('script-page');
+    const pagesLabel = document.getElementById('script-pages');
+    const zoomLabel = document.getElementById('script-zoom');
+    const pdfUrl = {{ script_url|tojson }};
+
+    let pdf = null;
+    let pageNumber = 1;
+    let zoom = 1;
+    let rendering = false;
+
+    function controls() {
+        previous.disabled = !pdf || pageNumber <= 1;
+        next.disabled = !pdf || pageNumber >= pdf.numPages;
+        pageLabel.textContent = pageNumber;
+        zoomLabel.textContent = Math.round(zoom * 100) + '%';
+    }
+
+    async function renderPage() {
+        if (!pdf || rendering) return;
+        rendering = true;
+        try {
+            const page = await pdf.getPage(pageNumber);
+            const viewport = page.getViewport({ scale: zoom });
+            const ratio = window.devicePixelRatio || 1;
+
+            canvas.width = Math.floor(viewport.width * ratio);
+            canvas.height = Math.floor(viewport.height * ratio);
+            canvas.style.width = viewport.width + 'px';
+            canvas.style.maxWidth = '100%';
+            canvas.style.height = 'auto';
+
+            await page.render({
+                canvasContext: context,
+                viewport: viewport,
+                transform: ratio !== 1 ? [ratio, 0, 0, ratio, 0, 0] : null
+            }).promise;
+
+            status.textContent = 'Script loaded successfully.';
+            controls();
+        } catch (error) {
+            console.error(error);
+            status.textContent = 'Could not display this page.';
+            errorBox.hidden = false;
+        } finally {
+            rendering = false;
+        }
+    }
+
+    previous.addEventListener('click', function () {
+        if (pageNumber > 1) {
+            pageNumber--;
+            renderPage();
+        }
+    });
+
+    next.addEventListener('click', function () {
+        if (pdf && pageNumber < pdf.numPages) {
+            pageNumber++;
+            renderPage();
+        }
+    });
+
+    zoomOut.addEventListener('click', function () {
+        zoom = Math.max(0.6, Math.round((zoom - 0.2) * 10) / 10);
+        renderPage();
+    });
+
+    zoomIn.addEventListener('click', function () {
+        zoom = Math.min(2.4, Math.round((zoom + 0.2) * 10) / 10);
+        renderPage();
+    });
+
+    async function openPdf() {
+        try {
+            if (!window.pdfjsLib) throw new Error('PDF.js did not load.');
+
+            pdfjsLib.GlobalWorkerOptions.workerSrc =
+                {{ url_for('static', filename='pdfjs/pdf.worker.min.js')|tojson }};
+
+            pdf = await pdfjsLib.getDocument({
+                url: pdfUrl,
+                withCredentials: true
+            }).promise;
+
+            pagesLabel.textContent = pdf.numPages;
+            await renderPage();
+        } catch (error) {
+            console.error(error);
+            status.textContent = 'Script could not be loaded.';
+            errorBox.hidden = false;
+        }
+    }
+
+    openPdf();
+})();
+</script>
+{% endif %}
 {% endblock %}

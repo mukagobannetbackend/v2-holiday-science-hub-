@@ -330,6 +330,24 @@ CREATE TABLE IF NOT EXISTS audit_logs(
     details TEXT,
     created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS answer_annotations(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    submission_id INTEGER NOT NULL,
+    question_id INTEGER NOT NULL,
+    page_number INTEGER NOT NULL DEFAULT 0,
+    annotations_json TEXT NOT NULL DEFAULT '[]',
+    updated_by INTEGER,
+    updated_at TEXT NOT NULL,
+    UNIQUE(submission_id, question_id, page_number)
+);
+
+CREATE TABLE IF NOT EXISTS submission_releases(
+    submission_id INTEGER PRIMARY KEY,
+    released_by INTEGER NOT NULL,
+    released_at TEXT NOT NULL
+);
+
 """
 
 
@@ -351,6 +369,16 @@ def init_db():
 
     else:
         db.connection.executescript(schema)
+
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS active_sessions (
+            user_id INTEGER PRIMARY KEY,
+            session_token TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
 
     db.execute(
         """

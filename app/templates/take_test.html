@@ -12,7 +12,23 @@
     </span>
 </div>
 
-<form method="post" class="answer-sheet">
+<form method="post" enctype="multipart/form-data" class="answer-sheet">
+    <article class="question-card">
+        <h2>Upload your handwritten script (optional)</h2>
+        <p>Upload your complete handwritten paper as one PDF, or upload a PNG/JPG photograph.</p>
+
+        {% if script_file %}
+            <p class="status ok">Script uploaded: {{ script_file }}</p>
+        {% endif %}
+
+        <label>
+            Choose PDF or photograph (maximum 25 MB)
+            <input type="file" name="script_file"
+                   accept=".pdf,.png,.jpg,.jpeg,application/pdf,image/png,image/jpeg"
+                   {% if submission and submission.status == 'Submitted' %}disabled{% endif %}>
+        </label>
+    </article>
+
     {% for q in questions %}
     <article class="question-card">
         <div class="question-head">
@@ -42,29 +58,9 @@
 {% if test_download_ready %}
 <section class="panel form-panel">
     <h2>Completed marked test</h2>
-    <p>Your teacher has released your results and attached the marking guide. You can now request permission to download your completed test report and marking guide.</p>
+    <p>Your teacher has released your results and attached the marking guide. You can download your completed test report and marking guide immediately.</p>
 
-    {% if test_download_request and test_download_request.status == 'Pending' %}
-        <p class="status warn">Your download request is awaiting admin approval.</p>
-    {% elif test_download_request and test_download_request.status == 'Approved' and test_download_request.expires_at and test_download_request.expires_at > current_time %}
-        <p class="status ok">Your request has been approved.</p>
-        <a class="btn primary" href="{{ url_for('download_marked_test', submission_id=submission.id) }}">Download completed test (ZIP)</a>
-    {% elif test_download_request and test_download_request.status == 'Rejected' %}
-        <p class="status warn">Your previous request was rejected. You may submit a new request.</p>
-        <form method="post" action="{{ url_for('request_test_download', submission_id=submission.id) }}">
-            <label>Reason (optional)
-                <textarea name="reason" placeholder="Why do you need the completed test?"></textarea>
-            </label>
-            <button class="btn primary" type="submit">Request download permission</button>
-        </form>
-    {% else %}
-        <form method="post" action="{{ url_for('request_test_download', submission_id=submission.id) }}">
-            <label>Reason (optional)
-                <textarea name="reason" placeholder="Why do you need the completed test?"></textarea>
-            </label>
-            <button class="btn primary" type="submit">Request download permission</button>
-        </form>
-    {% endif %}
+    <a class="btn primary" href="{{ url_for('download_marked_test', submission_id=submission.id) }}">Download completed test and marking guide (ZIP)</a>
 </section>
 {% endif %}
 {% endblock %}

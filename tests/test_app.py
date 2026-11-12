@@ -2,7 +2,8 @@
 from pathlib import Path
 import pytest
 from app import create_app
-from app.db import get_db
+from app.db import get_db, now
+from werkzeug.security import generate_password_hash
 
 @pytest.fixture()
 def app(tmp_path):
@@ -82,6 +83,155 @@ def test_written_test_draft_and_submission_lock(client):
     assert b'Submitted' in response.data
     response=client.post('/test/1',data={'answer_1':'Changed','action':'draft'},follow_redirects=True)
     assert b'already submitted' in response.data
+
+
+@pytest.mark.parametrize(
+    ("filename", "content"),
+    [
+        ("handwritten.pdf", b"%PDF-1.4\n% test PDF\n"),
+        ("handwritten.png", b"\x89PNG\r\n\x1a\n" + b"test image data"),
+        ("handwritten.jpg", b"\xff\xd8\xff" + b"test image data"),
+    ],
+)
+def test_student_can_upload_valid_script_files(client, filename, content):
+    login(client, "student@holidayhub.local", "Student@123")
+
+    response = client.post(
+        "/test/1",
+        data={
+            "action": "draft",
+            "script_file": (io.BytesIO(content), filename),
+        },
+        content_type="multipart/form-data",
+        follow_redirects=True,
+    )
+
+    assert response.status_code == 200
+
+    with client.application.app_context():
+        db = get_db()
+        rows = db.execute(
+            "SELECT uploaded_file FROM answers WHERE submission_id=("
+            "SELECT id FROM submissions WHERE test_id=1 LIMIT 1)"
+        ).fetchall()
+
+        assert rows
+        saved_names = {row["uploaded_file"] for row in rows}
+        assert len(saved_names) == 1
+        saved_name = saved_names.pop()
+        assert saved_name
+        saved_path = Path(client.application.config["UPLOAD_DIR"]) / saved_name
+        assert saved_path.exists()
+        assert saved_path.read_bytes() == content
+
+
+def test_student_upload_rejects_invalid_pdf_signature(client):
+    login(client, "student@holidayhub.local", "Student@123")
+
+    response = client.post(
+        "/test/1",
+        data={
+            "action": "draft",
+            "script_file": (io.BytesIO(b"not a real PDF"), "fake.pdf"),
+        },
+        content_type="multipart/form-data",
+        follow_redirects=True,
+    )
+
+    assert b"The uploaded PDF file is invalid." in response.data
+
+    with client.application.app_context():
+        db = get_db()
+        assert db.execute(
+            "SELECT COUNT(*) FROM submissions WHERE test_id=1"
+        ).fetchone()[0] == 0
+
+
+def test_student_draft_without_new_file_preserves_existing_upload(client):
+    login(client, "student@holidayhub.local", "Student@123")
+
+    client.post(
+        "/test/1",
+        data={
+            "action": "draft",
+            "script_file": (
+                io.BytesIO(b"%PDF-1.4\n% original script\n"),
+                "original.pdf",
+            ),
+        },
+        content_type="multipart/form-data",
+    )
+
+    with client.application.app_context():
+        db = get_db()
+        original_name = db.execute(
+            "SELECT uploaded_file FROM answers "
+            "WHERE uploaded_file IS NOT NULL LIMIT 1"
+        ).fetchone()["uploaded_file"]
+
+    response = client.post(
+        "/test/1",
+        data={"action": "draft", "answer_1": "Updated typed answer"},
+        follow_redirects=True,
+    )
+    assert response.status_code == 200
+
+    with client.application.app_context():
+        db = get_db()
+        saved_name = db.execute(
+            "SELECT uploaded_file FROM answers "
+            "WHERE uploaded_file IS NOT NULL LIMIT 1"
+        ).fetchone()["uploaded_file"]
+        assert saved_name == original_name
+        assert (
+            Path(client.application.config["UPLOAD_DIR"]) / saved_name
+        ).exists()
+
+
+def test_submitted_script_upload_cannot_be_replaced(client):
+    login(client, "student@holidayhub.local", "Student@123")
+
+    client.post(
+        "/test/1",
+        data={
+            "action": "submit",
+            "script_file": (
+                io.BytesIO(b"%PDF-1.4\n% submitted script\n"),
+                "submitted.pdf",
+            ),
+        },
+        content_type="multipart/form-data",
+    )
+
+    with client.application.app_context():
+        db = get_db()
+        original_name = db.execute(
+            "SELECT uploaded_file FROM answers "
+            "WHERE uploaded_file IS NOT NULL LIMIT 1"
+        ).fetchone()["uploaded_file"]
+
+    response = client.post(
+        "/test/1",
+        data={
+            "action": "draft",
+            "script_file": (
+                io.BytesIO(b"%PDF-1.4\n% replacement script\n"),
+                "replacement.pdf",
+            ),
+        },
+        content_type="multipart/form-data",
+        follow_redirects=True,
+    )
+
+    assert b"already submitted and locked" in response.data
+
+    with client.application.app_context():
+        db = get_db()
+        saved_name = db.execute(
+            "SELECT uploaded_file FROM answers "
+            "WHERE uploaded_file IS NOT NULL LIMIT 1"
+        ).fetchone()["uploaded_file"]
+        assert saved_name == original_name
 
 def test_teacher_marks_and_releases(client):
     login(client,'student@holidayhub.local','Student@123')
@@ -404,10 +554,23 @@ def test_marked_test_zip_download_permissions_and_contents(client):
         ).fetchone()[0]
         assert released == 1
 
-    # Student requests permission after marking and release.
+    # Student can download their own marked test immediately after release.
     client.post('/logout')
     login(client, 'student@holidayhub.local', 'Student@123')
 
+    with client.application.app_context():
+        db = get_db()
+        request_count_before = db.execute(
+            "SELECT COUNT(*) FROM test_download_requests"
+        ).fetchone()[0]
+        student_id = db.execute(
+            "SELECT id FROM users WHERE email='student@holidayhub.local'"
+        ).fetchone()['id']
+        admin_id = db.execute(
+            "SELECT id FROM users WHERE email='admin@holidayhub.local'"
+        ).fetchone()['id']
+
+    # The retired request endpoint must not create a new request.
     response = client.post(
         f'/test-submission/{submission_id}/download-request',
         data={'reason': 'I want to keep my marked work.'},
@@ -416,36 +579,19 @@ def test_marked_test_zip_download_permissions_and_contents(client):
     assert response.status_code == 200
 
     with client.application.app_context():
-        db = get_db()
-        req = db.execute(
-            "SELECT * FROM test_download_requests WHERE submission_id=? "
-            "ORDER BY id DESC LIMIT 1",
-            (submission_id,)
-        ).fetchone()
-        assert req is not None
-        request_id = req['id']
-        assert req['status'] == 'Pending'
+        request_count_after = get_db().execute(
+            "SELECT COUNT(*) FROM test_download_requests"
+        ).fetchone()[0]
+        assert request_count_after == request_count_before
 
-    # Student cannot download before admin approval.
-    response = client.get(
+    # Student downloads the ZIP without admin approval.
+    student_download = client.get(
         f'/test-submission/{submission_id}/download'
     )
-    assert response.status_code == 403
+    assert student_download.status_code == 200
+    assert student_download.mimetype == 'application/zip'
 
-    # Teacher cannot open the admin queue or approve a request.
-    assert teacher_client.get('/admin/test-download-requests').status_code == 403
-    assert teacher_client.post(
-        f'/admin/test-download-requests/{request_id}/approve'
-    ).status_code == 403
-
-    # Teacher can download directly once the marked materials are ready.
-    teacher_download = teacher_client.get(
-        f'/test-submission/{submission_id}/download'
-    )
-    assert teacher_download.status_code == 200
-    assert teacher_download.mimetype == 'application/zip'
-
-    with zipfile.ZipFile(io.BytesIO(teacher_download.data)) as archive:
+    with zipfile.ZipFile(io.BytesIO(student_download.data)) as archive:
         assert set(archive.namelist()) == {
             'marked_test_report.html',
             'marking_guide.pdf'
@@ -456,51 +602,12 @@ def test_marked_test_zip_download_permissions_and_contents(client):
         assert 'Marked Test Report' in report
         assert archive.read('marking_guide.pdf').startswith(b'%PDF-1.4')
 
-    # Only the administrator approves the student's request.
-    admin_client = client.application.test_client()
-    login(admin_client, 'admin@holidayhub.local', 'Admin@123')
-
-    assert admin_client.get('/admin/test-download-requests').status_code == 200
-
-    response = admin_client.post(
-        f'/admin/test-download-requests/{request_id}/approve',
-        follow_redirects=True
-    )
-    assert response.status_code == 200
-
+    # A student must not download another user's marked submission.
     with client.application.app_context():
-        approved = get_db().execute(
-            "SELECT * FROM test_download_requests WHERE id=?",
-            (request_id,)
-        ).fetchone()
-        assert approved['status'] == 'Approved'
-        assert approved['expires_at']
-
-        expiry = datetime.fromisoformat(
-            approved['expires_at'].replace('Z', '+00:00')
-        )
-        assert expiry > datetime.now(timezone.utc)
-
-    # Student can now download the ZIP.
-    student_download = client.get(
-        f'/test-submission/{submission_id}/download'
-    )
-    assert student_download.status_code == 200
-    assert student_download.mimetype == 'application/zip'
-
-    # Admin can also download directly.
-    admin_download = admin_client.get(
-        f'/test-submission/{submission_id}/download'
-    )
-    assert admin_download.status_code == 200
-
-    # Expired approval must block the student, but not the teacher.
-    with client.application.app_context():
-        past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
         db = get_db()
         db.execute(
-            "UPDATE test_download_requests SET expires_at=? WHERE id=?",
-            (past, request_id)
+            "UPDATE submissions SET student_id=? WHERE id=?",
+            (admin_id, submission_id)
         )
         db.commit()
 
@@ -508,7 +615,256 @@ def test_marked_test_zip_download_permissions_and_contents(client):
         f'/test-submission/{submission_id}/download'
     ).status_code == 403
 
-    assert teacher_client.get(
+    # Restore the original submission owner.
+    with client.application.app_context():
+        db = get_db()
+        db.execute(
+            "UPDATE submissions SET student_id=? WHERE id=?",
+            (student_id, submission_id)
+        )
+        db.commit()
+
+    # Teacher and administrator can download directly.
+    teacher_download = teacher_client.get(
         f'/test-submission/{submission_id}/download'
+    )
+    assert teacher_download.status_code == 200
+    assert teacher_download.mimetype == 'application/zip'
+
+    admin_client = client.application.test_client()
+    login(admin_client, 'admin@holidayhub.local', 'Admin@123')
+
+    admin_download = admin_client.get(
+        f'/test-submission/{submission_id}/download'
+    )
+    assert admin_download.status_code == 200
+    assert admin_download.mimetype == 'application/zip'
+
+
+
+def test_marked_results_release_is_individual_per_student(app):
+    student_a = app.test_client()
+    student_b = app.test_client()
+    teacher = app.test_client()
+
+    # Create a second approved student in the same class.
+    with app.app_context():
+        db = get_db()
+        existing_student = db.execute(
+            "SELECT class_id FROM student_profiles "
+            "WHERE user_id=(SELECT id FROM users "
+            "WHERE email='student@holidayhub.local')"
+        ).fetchone()
+        admin_id = db.execute(
+            "SELECT id FROM users WHERE email='admin@holidayhub.local'"
+        ).fetchone()['id']
+
+        cursor = db.execute(
+            """
+            INSERT INTO users (
+                full_name, email, phone, password_hash, role,
+                is_active, must_change_password, created_at
+            )
+            VALUES (?, ?, ?, ?, 'student', 1, 0, ?)
+            """,
+            (
+                'Second Approved Student',
+                'student2@holidayhub.local',
+                '0700000099',
+                generate_password_hash('Student2@123'),
+                now()
+            )
+        )
+        student_b_id = cursor.lastrowid
+
+        db.execute(
+            """
+            INSERT INTO student_profiles (user_id, class_id)
+            VALUES (?, ?)
+            """,
+            (student_b_id, existing_student['class_id'])
+        )
+
+        db.execute(
+            """
+            INSERT INTO payments (
+                student_id, amount, currency, reference,
+                status, verified_by, verified_at
+            )
+            VALUES (?, 50000, 'UGX', ?, 'Approved/Paid', ?, ?)
+            """,
+            (student_b_id, 'TEST-STUDENT-2', admin_id, now())
+        )
+        db.commit()
+
+        questions = db.execute(
+            "SELECT id FROM questions WHERE test_id=1 ORDER BY question_number"
+        ).fetchall()
+        question_ids = [q['id'] for q in questions]
+
+    assert question_ids
+
+    # Both students submit the same test through the normal student page.
+    for client, email, password in (
+        (student_a, 'student@holidayhub.local', 'Student@123'),
+        (student_b, 'student2@holidayhub.local', 'Student2@123')
+    ):
+        login(client, email, password)
+        answers = {'action': 'submit'}
+        for qid in question_ids:
+            answers[f'answer_{qid}'] = 'My submitted answer'
+
+        response = client.post(
+            '/test/1', data=answers, follow_redirects=True
+        )
+        assert response.status_code == 200
+
+    with app.app_context():
+        db = get_db()
+        submission_a = db.execute(
+            """
+            SELECT id FROM submissions
+            WHERE test_id=1 AND student_id=(
+                SELECT id FROM users WHERE email='student@holidayhub.local'
+            )
+            """
+        ).fetchone()['id']
+
+        submission_b = db.execute(
+            """
+            SELECT id FROM submissions
+            WHERE test_id=1 AND student_id=?
+            """,
+            (student_b_id,)
+        ).fetchone()['id']
+
+        teacher_id = db.execute(
+            "SELECT id FROM users WHERE email='teacher@holidayhub.local'"
+        ).fetchone()['id']
+
+    # Teacher marks and releases Student A's result only.
+    login(teacher, 'teacher@holidayhub.local', 'Teacher@123')
+
+    marks_data = {}
+    for qid in question_ids:
+        marks_data[f'mark_{qid}'] = '5'
+        marks_data[f'comment_{qid}'] = 'Good work.'
+
+    marks_data['marking_guide'] = (
+        io.BytesIO(b'%PDF-1.4\n% test guide'),
+        'marking_guide.pdf'
+    )
+
+    response = teacher.post(
+        f'/mark/{submission_a}',
+        data=marks_data,
+        content_type='multipart/form-data',
+        follow_redirects=True
+    )
+    assert response.status_code == 200
+
+    # Student B is also fully marked, but has not been individually released.
+    with app.app_context():
+        db = get_db()
+        for qid in question_ids:
+            db.execute(
+                """
+                INSERT INTO marks (
+                    submission_id, question_id, marks_awarded,
+                    teacher_comment, marked_by, released_at
+                )
+                VALUES (?, ?, 5, 'Awaiting release', ?, ?)
+                """,
+                (submission_b, qid, teacher_id, now())
+            )
+        db.commit()
+
+        marked_count = db.execute(
+            "SELECT COUNT(*) FROM marks WHERE submission_id=?",
+            (submission_b,)
+        ).fetchone()[0]
+        release_b = db.execute(
+            "SELECT submission_id FROM submission_releases "
+            "WHERE submission_id=?",
+            (submission_b,)
+        ).fetchone()
+
+        assert marked_count == len(question_ids)
+        assert release_b is None
+
+    # Student A can download; Student B cannot download A's released result
+    # or their own fully marked but unreleased result.
+    assert student_a.get(
+        f'/test-submission/{submission_a}/download'
     ).status_code == 200
+
+    assert student_b.get(
+        f'/test-submission/{submission_b}/download'
+    ).status_code == 403
+
+    # Teacher releases Student B's own result using a fresh form.
+    marks_data_b = {}
+    for qid in question_ids:
+        marks_data_b[f'mark_{qid}'] = '5'
+        marks_data_b[f'comment_{qid}'] = 'Good work.'
+
+    response = teacher.post(
+        f'/mark/{submission_b}',
+        data=marks_data_b,
+        follow_redirects=True
+    )
+    assert response.status_code == 200
+
+    with app.app_context():
+        release_b = get_db().execute(
+            "SELECT submission_id FROM submission_releases "
+            "WHERE submission_id=?",
+            (submission_b,)
+        ).fetchone()
+        assert release_b is not None
+
+    # Student B can now download without admin approval.
+    assert student_b.get(
+        f'/test-submission/{submission_b}/download'
+    ).status_code == 200
+
+
+def test_second_student_device_takes_over_and_first_can_login_again(app):
+    device_a = app.test_client()
+    device_b = app.test_client()
+
+    # Device A logs in first.
+    response_a = login(
+        device_a, 'student@holidayhub.local', 'Student@123'
+    )
+    assert response_a.status_code == 200
+    assert device_a.get('/timetable').status_code == 200
+
+    # Device B logs in using the same student account.
+    response_b = login(
+        device_b, 'student@holidayhub.local', 'Student@123'
+    )
+    assert response_b.status_code == 200
+    assert device_b.get('/timetable').status_code == 200
+
+    # Device A must now be asked to sign in again.
+    response_a = device_a.get('/timetable')
+    assert response_a.status_code == 302
+    assert '/login' in response_a.headers['Location']
+
+    # Logging out from Device A must not remove Device B's session.
+    device_a.get('/logout')
+    assert device_b.get('/timetable').status_code == 200
+
+    # Device A can log in again and take over normally.
+    response_a = login(
+        device_a, 'student@holidayhub.local', 'Student@123'
+    )
+    assert response_a.status_code == 200
+    assert device_a.get('/timetable').status_code == 200
+
+    # Device B is now the old device.
+    response_b = device_b.get('/timetable')
+    assert response_b.status_code == 302
+    assert '/login' in response_b.headers['Location']
 

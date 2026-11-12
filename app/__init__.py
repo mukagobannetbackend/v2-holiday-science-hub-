@@ -29,6 +29,7 @@ def create_app(test_config=None):
             'HUB_UPLOAD_DIR',
             str(Path(app.instance_path) / 'uploads')
         ),
+        MAX_CONTENT_LENGTH=25 * 1024 * 1024,
         SEED_DEMO_DATA=os.getenv(
             'SEED_DEMO_DATA',
             'false'
@@ -527,14 +528,22 @@ def create_app(test_config=None):
         status='Approved' if decision=='approve' else 'Rejected'; expiry=(datetime.now(timezone.utc)+timedelta(days=2)).isoformat() if status=='Approved' else None; db=get_db(); db.execute('UPDATE download_requests SET status=?,decided_by=?,decided_at=?,expires_at=? WHERE id=?',(status,current_user()['id'],now(),expiry,req_id)); db.commit(); audit(current_user()['id'],f'download_{decision}','download_request',str(req_id)); flash(f'Download request {status.lower()}.','success'); return redirect(url_for('library'))
 
     @app.get('/resource/<int:resource_id>/download')
-    @student_required
+    @role_required('admin', 'teacher', 'student')
     def download_resource(resource_id):
+        user = current_user()
         r = row('SELECT * FROM resources WHERE id=?', (resource_id,))
-        assigned_student(class_id=r['class_id'] if r else -1)
-        ok = row("SELECT * FROM download_requests WHERE student_id=? AND resource_id=? AND status='Approved' AND expires_at>=? ORDER BY id DESC LIMIT 1", (current_user()['id'], resource_id, now()))
 
-        if not r or not ok:
-            abort(403)
+        if not r:
+            abort(404)
+
+        if user['role'] == 'student':
+            assigned_student(class_id=r['class_id'])
+            ok = row(
+                "SELECT * FROM download_requests WHERE student_id=? AND resource_id=? AND status='Approved' AND expires_at>=? ORDER BY id DESC LIMIT 1",
+                (user['id'], resource_id, now())
+            )
+            if not ok:
+                abort(403)
 
         path, display_name, mimetype = resource_file_details(r)
         return send_file(
@@ -717,66 +726,133 @@ def create_app(test_config=None):
             if sub and sub['status'] == 'Submitted':
                 flash('This script is already submitted and locked.', 'error')
             else:
-                if not sub:
-                    sid = db.execute(
-                        """
-                        INSERT INTO submissions
-                        (test_id, student_id, status, updated_at)
-                        VALUES (?, ?, ?, ?)
-                        RETURNING id
-                        """,
-                        (test_id, current_user()['id'], 'Draft', now())
-                    ).fetchone()['id']
-                else:
-                    sid = sub['id']
+                upload = request.files.get('script_file')
+                uploaded_name = None
+                upload_error = None
 
-                for q in qs:
-                    db.execute(
-                        """
-                        INSERT INTO answers
-                        (submission_id, question_id, answer_text)
-                        VALUES (?, ?, ?)
-                        ON CONFLICT(submission_id, question_id)
-                        DO UPDATE SET answer_text=excluded.answer_text
-                        """,
-                        (sid, q['id'], request.form.get(f"answer_{q['id']}", ''))
+                if upload and upload.filename:
+                    original_name = secure_filename(upload.filename)
+                    extension = (
+                        original_name.rsplit('.', 1)[-1].lower()
+                        if '.' in original_name else ''
                     )
 
-                status = 'Submitted' if request.form.get('action') == 'submit' else 'Draft'
+                    content = upload.read(25 * 1024 * 1024 + 1)
 
-                db.execute(
-                    """
-                    UPDATE submissions
-                    SET status=?, submitted_at=?, updated_at=?
-                    WHERE id=?
-                    """,
-                    (status, now() if status == 'Submitted' else None, now(), sid)
-                )
+                    if len(content) > 25 * 1024 * 1024:
+                        upload_error = 'The script is too large. Maximum size is 25 MB.'
+                    elif extension not in ALLOWED_UPLOADS:
+                        upload_error = 'Upload a PDF, PNG or JPG/JPEG image.'
+                    elif extension == 'pdf' and not content.startswith(b'%PDF-'):
+                        upload_error = 'The uploaded PDF file is invalid.'
+                    elif extension == 'png' and not content.startswith(bytes.fromhex('89504e470d0a1a0a')):
+                        upload_error = 'The uploaded PNG image is invalid.'
+                    elif extension in {'jpg', 'jpeg'} and not content.startswith(bytes.fromhex('ffd8ff')):
+                        upload_error = 'The uploaded JPG image is invalid.'
 
-                db.commit()
-                audit(
-                    current_user()['id'],
-                    f'test_{status.lower()}',
-                    'submission',
-                    str(sid)
-                )
+                    if not upload_error:
+                        uploaded_name = (
+                            secrets.token_hex(12) + '_' + original_name
+                        )
+                        upload_path = Path(app.config['UPLOAD_DIR']) / uploaded_name
+                        upload_path.write_bytes(content)
 
-                flash(
-                    'Script submitted and locked.' if status == 'Submitted' else 'Draft saved.',
-                    'success'
-                )
+                if upload_error:
+                    flash(upload_error, 'error')
+                else:
+                    if not sub:
+                        sid = db.execute(
+                            """
+                            INSERT INTO submissions
+                            (test_id, student_id, status, updated_at)
+                            VALUES (?, ?, ?, ?)
+                            RETURNING id
+                            """,
+                            (test_id, current_user()['id'], 'Draft', now())
+                        ).fetchone()['id']
+                    else:
+                        sid = sub['id']
 
-                sub = row('SELECT * FROM submissions WHERE id=?', (sid,))
+                    for q in qs:
+                        db.execute(
+                            """
+                            INSERT INTO answers
+                            (submission_id, question_id, answer_text, uploaded_file)
+                            VALUES (?, ?, ?, ?)
+                            ON CONFLICT(submission_id, question_id)
+                            DO UPDATE SET
+                                answer_text=excluded.answer_text,
+                                uploaded_file=COALESCE(
+                                    excluded.uploaded_file,
+                                    answers.uploaded_file
+                                )
+                            """,
+                            (
+                                sid,
+                                q['id'],
+                                request.form.get(f"answer_{q['id']}", ''),
+                                uploaded_name
+                            )
+                        )
+
+                    status = (
+                        'Submitted'
+                        if request.form.get('action') == 'submit'
+                        else 'Draft'
+                    )
+
+                    db.execute(
+                        """
+                        UPDATE submissions
+                        SET status=?, submitted_at=?, updated_at=?
+                        WHERE id=?
+                        """,
+                        (status, now() if status == 'Submitted' else None, now(), sid)
+                    )
+
+                    db.commit()
+                    audit(
+                        current_user()['id'],
+                        f'test_{status.lower()}',
+                        'submission',
+                        str(sid)
+                    )
+
+                    flash(
+                        'Script submitted and locked.'
+                        if status == 'Submitted'
+                        else 'Draft saved.',
+                        'success'
+                    )
+
+                    sub = row('SELECT * FROM submissions WHERE id=?', (sid,))
 
         answers = {
             x['question_id']: x['answer_text']
             for x in rows('SELECT * FROM answers WHERE submission_id=?', (sub['id'],))
         } if sub else {}
 
-        test_download_ready = False
-        test_download_request = None
+        script_file = None
+        if sub:
+            script_row = row(
+                '''
+                SELECT uploaded_file
+                FROM answers
+                WHERE submission_id=? AND uploaded_file IS NOT NULL
+                LIMIT 1
+                ''',
+                (sub['id'],)
+            )
+            script_file = script_row['uploaded_file'] if script_row else None
 
-        if sub and sub['status'] == 'Submitted' and t['results_released']:
+        test_download_ready = False
+
+        release_record = row(
+            'SELECT submission_id FROM submission_releases WHERE submission_id=?',
+            (sub['id'],)
+        ) if sub else None
+
+        if sub and sub['status'] == 'Submitted' and release_record:
             guide = row(
                 'SELECT id FROM test_marking_guides WHERE test_id=?',
                 (test_id,)
@@ -788,110 +864,80 @@ def create_app(test_config=None):
 
             test_download_ready = bool(guide) and marked_count == len(qs) and len(qs) > 0
 
-            if test_download_ready:
-                test_download_request = row(
-                    """
-                    SELECT * FROM test_download_requests
-                    WHERE submission_id=? AND student_id=?
-                    ORDER BY id DESC LIMIT 1
-                    """,
-                    (sub['id'], current_user()['id'])
-                )
-
         return render_template(
             'take_test.html',
             test=t,
             questions=qs,
             submission=sub,
             answers=answers,
-            test_download_ready=test_download_ready,
-            test_download_request=test_download_request,
-            current_time=now()
+            script_file=script_file,
+            test_download_ready=test_download_ready
         )
 
     @app.post('/test-submission/<int:submission_id>/download-request')
     @student_required
     def request_test_download(submission_id):
         sub = row(
-            """
-            SELECT s.*, t.results_released
-            FROM submissions s
-            JOIN tests t ON t.id=s.test_id
-            WHERE s.id=? AND s.student_id=?
-            """,
+            'SELECT test_id FROM submissions WHERE id=? AND student_id=?',
             (submission_id, current_user()['id'])
         )
+        if not sub:
+            abort(404)
 
-        if not sub or sub['status'] != 'Submitted' or not sub['results_released']:
-            abort(403)
-
-        question_count = row(
-            'SELECT COUNT(*) AS total FROM questions WHERE test_id=?',
-            (sub['test_id'],)
-        )['total']
-
-        marked_count = row(
-            'SELECT COUNT(*) AS total FROM marks WHERE submission_id=?',
-            (submission_id,)
-        )['total']
-
-        guide = row(
-            'SELECT id FROM test_marking_guides WHERE test_id=?',
-            (sub['test_id'],)
-        )
-
-        if not guide or question_count == 0 or marked_count != question_count:
-            abort(403)
-
-        db = get_db()
-        current_request = row(
-            """
-            SELECT * FROM test_download_requests
-            WHERE submission_id=? AND student_id=?
-            ORDER BY id DESC LIMIT 1
-            """,
-            (submission_id, current_user()['id'])
-        )
-
-        current_time = now()
-
-        if current_request and current_request['status'] == 'Pending':
-            flash('Your download request is already awaiting admin approval.', 'info')
-            return redirect(url_for('take_test', test_id=sub['test_id']))
-
-        if (
-            current_request
-            and current_request['status'] == 'Approved'
-            and current_request['expires_at']
-            and current_request['expires_at'] > current_time
-        ):
-            flash('Your download request is already approved. You can download the completed test.', 'success')
-            return redirect(url_for('take_test', test_id=sub['test_id']))
-
-        db.execute(
-            """
-            INSERT INTO test_download_requests
-            (submission_id, student_id, reason, status, created_at)
-            VALUES (?, ?, ?, 'Pending', ?)
-            """,
-            (
-                submission_id,
-                current_user()['id'],
-                request.form.get('reason', '').strip(),
-                current_time
-            )
-        )
-        db.commit()
-
-        audit(
-            current_user()['id'],
-            'test_download_requested',
-            'submission',
-            str(submission_id)
-        )
-
-        flash('Your completed-test download request has been sent to the admin.', 'success')
+        flash('Download requests are no longer required for released marked tests. Use the download button on your test results page.', 'info')
         return redirect(url_for('take_test', test_id=sub['test_id']))
+
+    @app.get('/mark/<int:submission_id>/script')
+    @staff_required
+    def view_submission_script(submission_id):
+        submission = row(
+            'SELECT id FROM submissions WHERE id=? AND status=?',
+            (submission_id, 'Submitted')
+        )
+        if not submission:
+            abort(404)
+
+        script = row(
+            """
+            SELECT uploaded_file
+            FROM answers
+            WHERE submission_id=? AND uploaded_file IS NOT NULL
+            LIMIT 1
+            """,
+            (submission_id,)
+        )
+
+        if not script or not script['uploaded_file']:
+            abort(404)
+
+        stored_name = script['uploaded_file']
+
+        if Path(stored_name).name != stored_name:
+            abort(404)
+
+        extension = Path(stored_name).suffix.lower()
+        mime_types = {
+            '.pdf': 'application/pdf',
+            '.png': 'image/png',
+            '.jpg': 'image/jpeg',
+            '.jpeg': 'image/jpeg'
+        }
+
+        if extension not in mime_types:
+            abort(404)
+
+        upload_root = Path(app.config['UPLOAD_DIR']).resolve()
+        file_path = (upload_root / stored_name).resolve()
+
+        if file_path.parent != upload_root or not file_path.is_file():
+            abort(404)
+
+        return send_file(
+            str(file_path),
+            mimetype=mime_types[extension],
+            as_attachment=False,
+            conditional=True
+        )
 
     @app.get('/marking')
     @staff_required
@@ -925,6 +971,21 @@ def create_app(test_config=None):
             (submission_id, sub['test_id'])
         )
 
+        script_row = row(
+            '''
+            SELECT uploaded_file
+            FROM answers
+            WHERE submission_id=? AND uploaded_file IS NOT NULL
+            LIMIT 1
+            ''',
+            (submission_id,)
+        )
+        script_file = script_row['uploaded_file'] if script_row else None
+        script_url = (
+            url_for('view_submission_script', submission_id=submission_id)
+            if script_file else None
+        )
+
         guide = row(
             'SELECT * FROM test_marking_guides WHERE test_id=?',
             (sub['test_id'],)
@@ -939,7 +1000,8 @@ def create_app(test_config=None):
                 if not original_name or not original_name.lower().endswith('.pdf'):
                     flash('The marking guide must be a PDF file. Marks were not changed.', 'error')
                     return render_template(
-                        'mark.html', submission=sub, questions=qs, guide=guide
+                        'mark.html', submission=sub, questions=qs, guide=guide,
+                        script_file=script_file, script_url=script_url
                     )
 
                 signature = uploaded_guide.read(5)
@@ -948,7 +1010,8 @@ def create_app(test_config=None):
                 if signature != b'%PDF-':
                     flash('The uploaded file is not a valid PDF. Marks were not changed.', 'error')
                     return render_template(
-                        'mark.html', submission=sub, questions=qs, guide=guide
+                        'mark.html', submission=sub, questions=qs, guide=guide,
+                        script_file=script_file, script_url=script_url
                     )
 
                 stored_name = secrets.token_hex(8) + '_' + original_name
@@ -1003,9 +1066,23 @@ def create_app(test_config=None):
                     )
                 )
 
+            # Keep the legacy test-wide flag for compatibility.
             db.execute(
                 'UPDATE tests SET results_released=1 WHERE id=?',
                 (sub['test_id'],)
+            )
+
+            # Release results for this submission only.
+            db.execute(
+                '''
+                INSERT INTO submission_releases
+                    (submission_id, released_by, released_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(submission_id) DO UPDATE SET
+                    released_by=excluded.released_by,
+                    released_at=excluded.released_at
+                ''',
+                (submission_id, current_user()['id'], now())
             )
 
             db.commit()
@@ -1019,7 +1096,8 @@ def create_app(test_config=None):
             return redirect(url_for('marking'))
 
         return render_template(
-            'mark.html', submission=sub, questions=qs, guide=guide
+            'mark.html', submission=sub, questions=qs, guide=guide,
+            script_file=script_file, script_url=script_url
         )
     @app.route('/videos',methods=['GET','POST'])
     @role_required('admin','teacher','student')
@@ -1293,46 +1371,19 @@ def create_app(test_config=None):
         if not sub:
             abort(404)
 
-        if sub['status'] != 'Submitted' or not sub['results_released']:
+        if sub['status'] != 'Submitted':
             abort(403)
 
-        # Students may only download their own approved submission.
+        # Students may only download their own individually released submission.
         if user['role'] == 'student':
             if sub['student_id'] != user['id']:
                 abort(403)
 
-            approvals = rows(
-                """
-                SELECT expires_at
-                FROM test_download_requests
-                WHERE submission_id = ?
-                  AND student_id = ?
-                  AND status = 'Approved'
-                ORDER BY id DESC
-                """,
-                (submission_id, user['id'])
+            release_record = row(
+                'SELECT submission_id FROM submission_releases WHERE submission_id=?',
+                (submission_id,)
             )
-
-            valid_approval = False
-            current_time = datetime.now(timezone.utc)
-
-            for approval in approvals:
-                expiry_text = approval['expires_at']
-                if not expiry_text:
-                    continue
-                try:
-                    expiry = datetime.fromisoformat(
-                        expiry_text.replace('Z', '+00:00')
-                    )
-                    if expiry.tzinfo is None:
-                        expiry = expiry.replace(tzinfo=timezone.utc)
-                    if expiry > current_time:
-                        valid_approval = True
-                        break
-                except (ValueError, TypeError):
-                    continue
-
-            if not valid_approval:
+            if not release_record:
                 abort(403)
 
         # Confirm that every question has a saved mark.
