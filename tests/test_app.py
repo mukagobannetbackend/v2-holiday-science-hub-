@@ -1041,3 +1041,310 @@ def test_non_admin_cannot_use_bulk_student_management(client):
         data={'action': 'suspend', 'student_ids': '4'}
     )
     assert response.status_code == 403
+
+# ---------------------------------------------------------------------
+# Bulk learning-resource permission regression tests
+# ---------------------------------------------------------------------
+
+def _add_permission_test_resource(client, title, filename, class_id=2):
+    upload_dir = Path(client.application.config['UPLOAD_DIR'])
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    (upload_dir / filename).write_bytes(b'%PDF-1.4\n% permission test PDF\n')
+
+    with client.application.app_context():
+        db = get_db()
+        db.execute(
+            """
+            INSERT INTO resources
+            (title, description, filename, level, class_id,
+             subject_id, topic, uploaded_by, created_at)
+            VALUES (?, '', ?, 'O-Level', ?, 1, 'Cells', 1, ?)
+            """,
+            (title, filename, class_id, now())
+        )
+        db.commit()
+        return db.execute(
+            "SELECT id FROM resources WHERE filename=?",
+            (filename,)
+        ).fetchone()['id']
+
+
+def _add_second_s2_permission_test_student(client):
+    with client.application.app_context():
+        db = get_db()
+        db.execute(
+            """
+            INSERT INTO users
+            (full_name, email, phone, password_hash, role,
+             is_active, must_change_password, created_at)
+            VALUES (?, ?, '', ?, 'student', 1, 0, ?)
+            """,
+            (
+                'Second S2 Student',
+                'second-s2-permission-test@holidayhub.local',
+                generate_password_hash('SecondStudent@123'),
+                now()
+            )
+        )
+        student_id = db.execute(
+            "SELECT id FROM users WHERE email=?",
+            ('second-s2-permission-test@holidayhub.local',)
+        ).fetchone()['id']
+
+        db.execute(
+            """
+            INSERT INTO student_profiles
+            (user_id, class_id, admission_no, guardian_contact)
+            VALUES (?, 2, ?, '')
+            """,
+            (student_id, 'HCH-TEST-S2-002')
+        )
+        db.commit()
+        return student_id
+
+
+def test_bulk_resource_grant_supports_multiple_students_and_resources(client):
+    login(client, 'admin@holidayhub.local', 'Admin@123')
+
+    second_student_id = _add_second_s2_permission_test_student(client)
+    resource_one = _add_permission_test_resource(
+        client, 'Bulk permission note one', 'bulk-permission-one.pdf'
+    )
+    resource_two = _add_permission_test_resource(
+        client, 'Bulk permission note two', 'bulk-permission-two.pdf'
+    )
+
+    with client.application.app_context():
+        db = get_db()
+        first_student_id = db.execute(
+            "SELECT id FROM users WHERE email='student@holidayhub.local'"
+        ).fetchone()['id']
+        admin_id = db.execute(
+            "SELECT id FROM users WHERE email='admin@holidayhub.local'"
+        ).fetchone()['id']
+
+    grant_data = {
+        'class_id': '2',
+        'student_ids': [str(first_student_id), str(second_student_id)],
+        'resource_ids': [str(resource_one), str(resource_two)]
+    }
+
+    response = client.post(
+        '/admin/resource-permissions/grant',
+        data=grant_data,
+        follow_redirects=True
+    )
+    assert response.status_code == 200
+
+    with client.application.app_context():
+        db = get_db()
+        grants = db.execute(
+            """
+            SELECT student_id, resource_id, granted_by, granted_at
+            FROM resource_access_grants
+            ORDER BY student_id, resource_id
+            """
+        ).fetchall()
+
+        assert len(grants) == 4
+        assert all(grant['granted_by'] == admin_id for grant in grants)
+        assert all(grant['granted_at'] for grant in grants)
+        assert {
+            (grant['student_id'], grant['resource_id'])
+            for grant in grants
+        } == {
+            (first_student_id, resource_one),
+            (first_student_id, resource_two),
+            (second_student_id, resource_one),
+            (second_student_id, resource_two)
+        }
+
+        audit_count = db.execute(
+            """
+            SELECT COUNT(*) FROM audit_logs
+            WHERE action='resource_access_granted'
+            """
+        ).fetchone()[0]
+        assert audit_count == 4
+
+    # Repeating the same grant must not create duplicate active permissions.
+    response = client.post(
+        '/admin/resource-permissions/grant',
+        data=grant_data,
+        follow_redirects=True
+    )
+    assert response.status_code == 200
+
+    with client.application.app_context():
+        active_count = get_db().execute(
+            """
+            SELECT COUNT(*) FROM resource_access_grants
+            WHERE revoked_at IS NULL
+            """
+        ).fetchone()[0]
+        assert active_count == 4
+
+
+def test_revoking_bulk_grant_preserves_individual_download_approval(client):
+    login(client, 'admin@holidayhub.local', 'Admin@123')
+    resource_id = _add_permission_test_resource(
+        client, 'Independent approval note', 'individual-approval-note.pdf'
+    )
+
+    client.get('/logout')
+    login(client, 'student@holidayhub.local', 'Student@123')
+
+    request_response = client.post(
+        '/library',
+        data={
+            'resource_id': str(resource_id),
+            'reason': 'Revision'
+        },
+        follow_redirects=True
+    )
+    assert b'Download request sent' in request_response.data
+
+    client.get('/logout')
+    login(client, 'admin@holidayhub.local', 'Admin@123')
+
+    with client.application.app_context():
+        db = get_db()
+        request_id = db.execute(
+            """
+            SELECT id FROM download_requests
+            WHERE resource_id=?
+            ORDER BY id DESC LIMIT 1
+            """,
+            (resource_id,)
+        ).fetchone()['id']
+
+    approval_response = client.post(
+        f'/downloads/{request_id}/approve',
+        follow_redirects=True
+    )
+    assert approval_response.status_code == 200
+
+    with client.application.app_context():
+        student_id = get_db().execute(
+            "SELECT id FROM users WHERE email='student@holidayhub.local'"
+        ).fetchone()['id']
+
+    grant_response = client.post(
+        '/admin/resource-permissions/grant',
+        data={
+            'class_id': '2',
+            'student_ids': str(student_id),
+            'resource_ids': str(resource_id)
+        },
+        follow_redirects=True
+    )
+    assert grant_response.status_code == 200
+
+    with client.application.app_context():
+        grant_id = get_db().execute(
+            """
+            SELECT id FROM resource_access_grants
+            WHERE resource_id=? AND revoked_at IS NULL
+            """,
+            (resource_id,)
+        ).fetchone()['id']
+
+    revoke_response = client.post(
+        '/admin/resource-permissions/revoke',
+        data={
+            'class_id': '2',
+            'grant_ids': str(grant_id)
+        },
+        follow_redirects=True
+    )
+    assert revoke_response.status_code == 200
+
+    with client.application.app_context():
+        revoked = get_db().execute(
+            """
+            SELECT revoked_by, revoked_at
+            FROM resource_access_grants WHERE id=?
+            """,
+            (grant_id,)
+        ).fetchone()
+        assert revoked['revoked_by'] is not None
+        assert revoked['revoked_at']
+
+        individual_approval = get_db().execute(
+            """
+            SELECT status, expires_at FROM download_requests
+            WHERE id=?
+            """,
+            (request_id,)
+        ).fetchone()
+        assert individual_approval['status'] == 'Approved'
+        assert individual_approval['expires_at']
+
+    client.get('/logout')
+    login(client, 'student@holidayhub.local', 'Student@123')
+
+    # The independent individual approval must still permit downloading.
+    assert client.get(
+        f'/resource/{resource_id}/download'
+    ).status_code == 200
+
+    # Online reading must remain available too.
+    assert client.get(
+        f'/resource/{resource_id}/reader'
+    ).status_code == 200
+
+
+def test_bulk_resource_grant_rejects_mixed_class_selection_without_partial_changes(client):
+    login(client, 'admin@holidayhub.local', 'Admin@123')
+
+    resource_id = _add_permission_test_resource(
+        client, 'S2 class restriction note', 's2-class-restriction.pdf'
+    )
+
+    with client.application.app_context():
+        db = get_db()
+        s2_student_id = db.execute(
+            "SELECT id FROM users WHERE email='student@holidayhub.local'"
+        ).fetchone()['id']
+        s4_student_id = db.execute(
+            "SELECT id FROM users WHERE email='pending@holidayhub.local'"
+        ).fetchone()['id']
+
+    response = client.post(
+        '/admin/resource-permissions/grant',
+        data={
+            'class_id': '2',
+            'student_ids': [str(s2_student_id), str(s4_student_id)],
+            'resource_ids': str(resource_id)
+        },
+        follow_redirects=True
+    )
+    assert response.status_code == 200
+    assert b'No permissions were changed' in response.data
+
+    with client.application.app_context():
+        count = get_db().execute(
+            """
+            SELECT COUNT(*) FROM resource_access_grants
+            WHERE resource_id=?
+            """,
+            (resource_id,)
+        ).fetchone()[0]
+        assert count == 0
+
+
+def test_student_cannot_open_or_submit_bulk_resource_permissions(client):
+    login(client, 'student@holidayhub.local', 'Student@123')
+
+    assert client.get('/admin/resource-permissions').status_code == 403
+
+    response = client.post(
+        '/admin/resource-permissions/grant',
+        data={
+            'class_id': '2',
+            'student_ids': '2',
+            'resource_ids': '1'
+        }
+    )
+    assert response.status_code == 403
+

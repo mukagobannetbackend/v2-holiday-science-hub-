@@ -34,6 +34,7 @@ class DatabaseConnection:
     def executemany(self, sql, args):
         if self.is_postgres:
             sql = sql.replace("?", "%s")
+            return self.connection.cursor().executemany(sql, args)
         return self.connection.executemany(sql, args)
 
     def commit(self):
@@ -347,6 +348,22 @@ CREATE TABLE IF NOT EXISTS submission_releases(
     released_by INTEGER NOT NULL,
     released_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS resource_access_grants(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    student_id INTEGER NOT NULL REFERENCES users(id),
+    resource_id INTEGER NOT NULL REFERENCES resources(id),
+    granted_by INTEGER NOT NULL REFERENCES users(id),
+    granted_at TEXT NOT NULL,
+    revoked_by INTEGER REFERENCES users(id),
+    revoked_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_resource_access_grants_lookup
+ON resource_access_grants(student_id, resource_id, revoked_at);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_active_resource_access_grant
+ON resource_access_grants(student_id, resource_id)
+WHERE revoked_at IS NULL;
 
 """
 

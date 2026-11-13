@@ -1,0 +1,215 @@
+{% extends 'base.html' %}
+{% block title %}Resource permissions - Holiday Science Hub{% endblock %}
+{% block content %}
+
+<div class="page-head">
+    <div>
+        <span class="eyebrow">ADMINISTRATION</span>
+        <h1>Resource permissions.</h1>
+        <p>Grant or revoke learning-resource download access for several students at once.</p>
+    </div>
+</div>
+
+<div class="panel form-panel">
+    <span class="eyebrow">STEP 1</span>
+    <h2>Choose a class.</h2>
+    <form method="get" action="{{ url_for('resource_permissions') }}">
+        <div class="form-grid">
+            <label>
+                Class
+                <select name="class_id" required>
+                    {% for c in classes %}
+                    <option value="{{ c.id }}" {% if c.id == selected_class.id %}selected{% endif %}>
+                        {{ c.name }} - {{ c.level }}
+                    </option>
+                    {% endfor %}
+                </select>
+            </label>
+            <div style="display:flex;align-items:end;">
+                <button class="btn primary" type="submit">Load class</button>
+            </div>
+        </div>
+    </form>
+</div>
+
+<div class="panel form-panel">
+    <span class="eyebrow">STEP 2</span>
+    <h2>Grant download access.</h2>
+    <p class="muted">
+        Select one or more students and one or more resources.
+        Access will be granted for every selected student-resource combination.
+    </p>
+
+    <form method="post" action="{{ url_for('grant_resource_permissions') }}"
+          onsubmit="return confirm('Grant download access to all selected student-resource combinations?');">
+        <input type="hidden" name="class_id" value="{{ selected_class.id }}">
+
+        <div class="section-head">
+            <h2>Students in {{ selected_class.name }}</h2>
+            <label style="display:flex;align-items:center;gap:7px;">
+                <input type="checkbox" id="selectAllPermissionStudents">
+                Select all students
+            </label>
+        </div>
+
+        {% if students %}
+        <div class="table-wrap" style="margin:12px 0 24px;">
+            <table>
+                <thead>
+                    <tr><th>Select</th><th>Student</th><th>Account status</th></tr>
+                </thead>
+                <tbody>
+                    {% for student in students %}
+                    <tr>
+                        <td>
+                            <input type="checkbox" name="student_ids"
+                                   value="{{ student.id }}" class="permission-student">
+                        </td>
+                        <td>
+                            <b>{{ student.full_name }}</b>
+                            <small>{{ student.email }}</small>
+                        </td>
+                        <td>
+                            {% if student.is_active %}
+                            <span class="status ok">Active</span>
+                            {% else %}
+                            <span class="status warn">Inactive / Suspended</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <p class="empty">There are no registered students in this class.</p>
+        {% endif %}
+
+        <div class="section-head">
+            <h2>Learning resources</h2>
+            <label style="display:flex;align-items:center;gap:7px;">
+                <input type="checkbox" id="selectAllPermissionResources">
+                Select all resources
+            </label>
+        </div>
+
+        {% if resources %}
+        <div class="table-wrap" style="margin:12px 0 20px;">
+            <table>
+                <thead>
+                    <tr><th>Select</th><th>Resource</th><th>Topic</th></tr>
+                </thead>
+                <tbody>
+                    {% for resource in resources %}
+                    <tr>
+                        <td>
+                            <input type="checkbox" name="resource_ids"
+                                   value="{{ resource.id }}" class="permission-resource">
+                        </td>
+                        <td><b>{{ resource.title }}</b></td>
+                        <td>{{ resource.topic or '?' }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <p class="empty">There are no available learning resources for this class.</p>
+        {% endif %}
+
+        <button class="btn primary" type="submit"
+                {% if not students or not resources %}disabled{% endif %}>
+            Grant access to selected
+        </button>
+    </form>
+</div>
+
+<div class="section-head" style="margin:30px 0 14px;">
+    <div>
+        <span class="eyebrow">CURRENT BULK PERMISSIONS</span>
+        <h2>Active permissions for {{ selected_class.name }}</h2>
+        <p class="muted">You can revoke selected bulk permissions at any time.</p>
+    </div>
+</div>
+
+{% if active_grants %}
+<div class="table-wrap">
+    <form method="post" action="{{ url_for('revoke_resource_permissions') }}"
+          onsubmit="return confirm('Revoke the selected bulk download permissions? Individual approvals will remain unaffected.');">
+        <input type="hidden" name="class_id" value="{{ selected_class.id }}">
+        <table>
+            <thead>
+                <tr>
+                    <th>
+                        <label style="display:flex;align-items:center;gap:7px;">
+                            <input type="checkbox" id="selectAllActiveGrants">
+                            All
+                        </label>
+                    </th>
+                    <th>Student</th><th>Resource</th><th>Granted on</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for grant in active_grants %}
+                <tr>
+                    <td>
+                        <input type="checkbox" name="grant_ids"
+                               value="{{ grant.id }}" class="active-grant-select">
+                    </td>
+                    <td>{{ grant.student_name }}</td>
+                    <td>{{ grant.resource_title }}</td>
+                    <td>{{ grant.granted_at }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        <div style="padding:14px;">
+            <button class="btn danger" type="submit">Revoke selected permissions</button>
+        </div>
+    </form>
+</div>
+{% else %}
+<div class="panel">
+    <p class="empty">There are no active bulk permissions for this class.</p>
+</div>
+{% endif %}
+
+<div class="panel" style="margin-top:22px;">
+    <span class="eyebrow">IMPORTANT</span>
+    <p class="muted">
+        These permissions apply only to downloading learning resources.
+        Students can still read resources online through the resource viewer.
+        Individual download approvals remain separate. Revoking a bulk permission
+        does not cancel an active individual approval.
+    </p>
+</div>
+
+<script>
+(function () {
+    function connectSelectAll(masterId, itemClass) {
+        const master = document.getElementById(masterId);
+        if (!master) return;
+        const items = Array.from(document.querySelectorAll('.' + itemClass));
+
+        master.addEventListener('change', function () {
+            items.forEach(function (item) {
+                item.checked = master.checked;
+            });
+        });
+
+        items.forEach(function (item) {
+            item.addEventListener('change', function () {
+                master.checked = items.length > 0 && items.every(function (entry) {
+                    return entry.checked;
+                });
+            });
+        });
+    }
+
+    connectSelectAll('selectAllPermissionStudents', 'permission-student');
+    connectSelectAll('selectAllPermissionResources', 'permission-resource');
+    connectSelectAll('selectAllActiveGrants', 'active-grant-select');
+})();
+</script>
+
+{% endblock %}

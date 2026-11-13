@@ -588,6 +588,256 @@ def create_app(test_config=None):
 
         flash('Announcement published to the in-app notice stream.', 'success')
         return redirect(url_for('dashboard'))
+    @app.get('/admin/resource-permissions')
+    @admin_required
+    def resource_permissions():
+        classes = rows("SELECT id, name, level FROM classes ORDER BY id")
+        if not classes:
+            abort(404)
+
+        try:
+            class_id = int(request.args.get('class_id') or classes[0]['id'])
+        except (TypeError, ValueError):
+            class_id = classes[0]['id']
+
+        selected_class = row(
+            "SELECT id, name, level FROM classes WHERE id=?",
+            (class_id,)
+        )
+        if not selected_class:
+            class_id = classes[0]['id']
+            selected_class = classes[0]
+
+        students = rows(
+            """
+            SELECT u.id, u.full_name, u.email, u.is_active
+            FROM users u
+            JOIN student_profiles sp ON sp.user_id = u.id
+            WHERE u.role='student' AND sp.class_id=?
+            ORDER BY u.full_name
+            """,
+            (class_id,)
+        )
+
+        resources = rows(
+            """
+            SELECT id, title, subject_id, topic
+            FROM resources
+            WHERE class_id=? AND archived=0
+            ORDER BY title
+            """,
+            (class_id,)
+        )
+
+        active_grants = rows(
+            """
+            SELECT g.id, g.granted_at, u.full_name AS student_name,
+                   r.title AS resource_title
+            FROM resource_access_grants g
+            JOIN users u ON u.id=g.student_id
+            JOIN resources r ON r.id=g.resource_id
+            JOIN student_profiles sp ON sp.user_id=u.id
+            WHERE sp.class_id=? AND r.class_id=? AND g.revoked_at IS NULL
+            ORDER BY g.granted_at DESC, u.full_name
+            """,
+            (class_id, class_id)
+        )
+
+        return render_template(
+            'resource_permissions.html',
+            classes=classes,
+            selected_class=selected_class,
+            students=students,
+            resources=resources,
+            active_grants=active_grants
+        )
+
+    @app.post('/admin/resource-permissions/grant')
+    @admin_required
+    def grant_resource_permissions():
+        db = get_db()
+        actor_id = current_user()['id']
+
+        try:
+            class_id = int(request.form.get('class_id', ''))
+            raw_student_ids = request.form.getlist('student_ids')
+            raw_resource_ids = request.form.getlist('resource_ids')
+
+            student_ids = list(dict.fromkeys(int(value) for value in raw_student_ids))
+            resource_ids = list(dict.fromkeys(int(value) for value in raw_resource_ids))
+
+            if class_id <= 0 or not student_ids or not resource_ids:
+                raise ValueError
+
+            if any(value <= 0 for value in student_ids + resource_ids):
+                raise ValueError
+        except (TypeError, ValueError):
+            flash('Select a valid class, at least one student and at least one resource.', 'error')
+            return redirect(url_for('resource_permissions'))
+
+        if not row("SELECT id FROM classes WHERE id=?", (class_id,)):
+            flash('The selected class was not found. No permissions were changed.', 'error')
+            return redirect(url_for('resource_permissions'))
+
+        for student_id in student_ids:
+            valid_student = row(
+                """
+                SELECT u.id FROM users u
+                JOIN student_profiles sp ON sp.user_id=u.id
+                WHERE u.id=? AND u.role='student' AND sp.class_id=?
+                """,
+                (student_id, class_id)
+            )
+            if not valid_student:
+                flash('No permissions were changed. A selected student is not in this class.', 'error')
+                return redirect(url_for('resource_permissions', class_id=class_id))
+
+        for resource_id in resource_ids:
+            valid_resource = row(
+                """
+                SELECT id FROM resources
+                WHERE id=? AND class_id=? AND archived=0
+                """,
+                (resource_id, class_id)
+            )
+            if not valid_resource:
+                flash('No permissions were changed. A selected resource is unavailable or belongs to another class.', 'error')
+                return redirect(url_for('resource_permissions', class_id=class_id))
+
+        created = 0
+        skipped = 0
+
+        try:
+            for student_id in student_ids:
+                for resource_id in resource_ids:
+                    existing = row(
+                        """
+                        SELECT id FROM resource_access_grants
+                        WHERE student_id=? AND resource_id=? AND revoked_at IS NULL
+                        LIMIT 1
+                        """,
+                        (student_id, resource_id)
+                    )
+
+                    if existing:
+                        skipped += 1
+                        continue
+
+                    stamp = now()
+                    db.execute(
+                        """
+                        INSERT INTO resource_access_grants
+                        (student_id, resource_id, granted_by, granted_at)
+                        VALUES (?, ?, ?, ?)
+                        """,
+                        (student_id, resource_id, actor_id, stamp)
+                    )
+
+                    db.execute(
+                        """
+                        INSERT INTO audit_logs
+                        (actor_id, action, target_type, target_id, details, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            actor_id,
+                            'resource_access_granted',
+                            'resource',
+                            str(resource_id),
+                            f'Bulk download access granted to student ID {student_id}',
+                            stamp
+                        )
+                    )
+                    created += 1
+
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+
+        flash(
+            f'Bulk access granted for {created} student-resource combination(s). '
+            f'{skipped} existing active permission(s) skipped.',
+            'success'
+        )
+        return redirect(url_for('resource_permissions', class_id=class_id))
+
+    @app.post('/admin/resource-permissions/revoke')
+    @admin_required
+    def revoke_resource_permissions():
+        db = get_db()
+        actor_id = current_user()['id']
+
+        try:
+            class_id = int(request.form.get('class_id', ''))
+            raw_grant_ids = request.form.getlist('grant_ids')
+            grant_ids = list(dict.fromkeys(int(value) for value in raw_grant_ids))
+
+            if class_id <= 0 or not grant_ids:
+                raise ValueError
+
+            if any(value <= 0 for value in grant_ids):
+                raise ValueError
+        except (TypeError, ValueError):
+            flash('Select a valid class and at least one active permission to revoke.', 'error')
+            return redirect(url_for('resource_permissions'))
+
+        if not row("SELECT id FROM classes WHERE id=?", (class_id,)):
+            flash('The selected class was not found. No permissions were changed.', 'error')
+            return redirect(url_for('resource_permissions'))
+
+        for grant_id in grant_ids:
+            valid_grant = row(
+                """
+                SELECT g.id
+                FROM resource_access_grants g
+                JOIN resources r ON r.id=g.resource_id
+                JOIN student_profiles sp ON sp.user_id=g.student_id
+                WHERE g.id=? AND g.revoked_at IS NULL
+                  AND r.class_id=? AND sp.class_id=?
+                """,
+                (grant_id, class_id, class_id)
+            )
+            if not valid_grant:
+                flash('No permissions were revoked. One or more selected permissions are invalid or no longer active.', 'error')
+                return redirect(url_for('resource_permissions', class_id=class_id))
+
+        try:
+            for grant_id in grant_ids:
+                stamp = now()
+                db.execute(
+                    """
+                    UPDATE resource_access_grants
+                    SET revoked_by=?, revoked_at=?
+                    WHERE id=? AND revoked_at IS NULL
+                    """,
+                    (actor_id, stamp, grant_id)
+                )
+
+                db.execute(
+                    """
+                    INSERT INTO audit_logs
+                    (actor_id, action, target_type, target_id, details, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        actor_id,
+                        'resource_access_revoked',
+                        'resource_access_grant',
+                        str(grant_id),
+                        'Bulk resource download permission revoked',
+                        stamp
+                    )
+                )
+
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+
+        flash(f'{len(grant_ids)} bulk permission(s) revoked.', 'success')
+        return redirect(url_for('resource_permissions', class_id=class_id))
+
     @app.route('/library',methods=['GET','POST'])
     @role_required('admin','teacher','student')
     def library():
@@ -600,7 +850,30 @@ def create_app(test_config=None):
                 if not f or ext not in ALLOWED_UPLOADS: flash('Upload a PDF or image file.','error')
                 else:
                     token=secrets.token_hex(8)+'_'+secure_filename(f.filename); f.save(Path(app.config['UPLOAD_DIR'])/token); db=get_db(); db.execute('INSERT INTO resources(title,description,filename,level,class_id,subject_id,topic,uploaded_by,created_at) VALUES(?,?,?,?,?,?,?,?,?)',(request.form['title'],request.form.get('description',''),token,request.form['level'],request.form['class_id'],request.form['subject_id'],request.form.get('topic',''),u['id'],now())); db.commit(); audit(u['id'],'resource_uploaded','resource',token); flash('Resource uploaded.','success')
-        if u['role']=='student': resources=rows('SELECT r.*,c.name class_name,s.name subject_name FROM resources r JOIN classes c ON c.id=r.class_id JOIN subjects s ON s.id=r.subject_id WHERE r.class_id=? AND r.archived=0 ORDER BY r.created_at DESC',(profile['class_id'],))
+        if u['role']=='student':
+            resources=rows(
+                '''
+                SELECT r.*, c.name AS class_name, s.name AS subject_name,
+                    CASE WHEN
+                        EXISTS (
+                            SELECT 1 FROM download_requests dr
+                            WHERE dr.student_id=? AND dr.resource_id=r.id
+                              AND dr.status='Approved' AND dr.expires_at>=?
+                        )
+                        OR EXISTS (
+                            SELECT 1 FROM resource_access_grants g
+                            WHERE g.student_id=? AND g.resource_id=r.id
+                              AND g.revoked_at IS NULL
+                        )
+                    THEN 1 ELSE 0 END AS can_download
+                FROM resources r
+                JOIN classes c ON c.id=r.class_id
+                JOIN subjects s ON s.id=r.subject_id
+                WHERE r.class_id=? AND r.archived=0
+                ORDER BY r.created_at DESC
+                ''',
+                (u['id'], now(), u['id'], profile['class_id'])
+            )
         else: resources=rows('SELECT r.*,c.name class_name,s.name subject_name,u.full_name uploader FROM resources r JOIN classes c ON c.id=r.class_id JOIN subjects s ON s.id=r.subject_id LEFT JOIN users u ON u.id=r.uploaded_by WHERE r.archived=0 ORDER BY r.created_at DESC')
         return render_template('library.html',resources=resources,profile=profile,requests=rows('SELECT dr.*,u.full_name,r.title FROM download_requests dr JOIN users u ON u.id=dr.student_id JOIN resources r ON r.id=dr.resource_id ORDER BY dr.id DESC') if u['role']=='admin' else [])
     def resource_file_details(resource):
@@ -678,11 +951,22 @@ def create_app(test_config=None):
 
         if user['role'] == 'student':
             assigned_student(class_id=r['class_id'])
-            ok = row(
-                "SELECT * FROM download_requests WHERE student_id=? AND resource_id=? AND status='Approved' AND expires_at>=? ORDER BY id DESC LIMIT 1",
+            individual_approval = row(
+                "SELECT id FROM download_requests "
+                "WHERE student_id=? AND resource_id=? "
+                "AND status='Approved' AND expires_at>=? "
+                "ORDER BY id DESC LIMIT 1",
                 (user['id'], resource_id, now())
             )
-            if not ok:
+
+            bulk_grant = row(
+                "SELECT id FROM resource_access_grants "
+                "WHERE student_id=? AND resource_id=? "
+                "AND revoked_at IS NULL LIMIT 1",
+                (user['id'], resource_id)
+            )
+
+            if not individual_approval and not bulk_grant:
                 abort(403)
 
         path, display_name, mimetype = resource_file_details(r)

@@ -349,3 +349,152 @@
     max-width: 100%;
     height: auto;
 }
+
+/* Compact staff identity-card design for public About Us */
+.staff-profile-grid{
+    display:grid;
+    grid-template-columns:repeat(auto-fit,minmax(320px,1fr));
+    gap:16px;
+    align-items:stretch;
+}
+
+.staff-profile-card{
+    display:grid;
+    grid-template-columns:112px minmax(0,1fr);
+    gap:0;
+    overflow:hidden;
+    border:1px solid rgba(201,166,91,.35);
+    border-radius:12px;
+    background:var(--panel,#17191d);
+    box-shadow:0 5px 18px rgba(0,0,0,.16);
+}
+
+.staff-profile-photo,
+.staff-profile-placeholder{
+    width:112px;
+    height:145px;
+    object-fit:cover;
+    border-radius:0;
+    background:#24262b;
+}
+
+.staff-profile-placeholder{
+    display:grid;
+    place-items:center;
+    color:var(--gold,#c9a65b);
+    font-size:2.5rem;
+    font-weight:800;
+}
+
+.staff-profile-content{
+    min-width:0;
+    padding:13px 15px;
+}
+
+.staff-profile-content h3{
+    margin:0 0 4px;
+    font-size:1.05rem;
+    line-height:1.3;
+}
+
+.staff-profile-content p{
+    margin:4px 0;
+    font-size:.86rem;
+    line-height:1.45;
+    overflow-wrap:anywhere;
+}
+
+.staff-job-title{
+    color:var(--gold,#c9a65b);
+    font-weight:700;
+}
+
+.staff-detail{
+    margin-top:9px;
+}
+
+.staff-detail strong,
+.staff-contact strong{
+    display:block;
+    margin-bottom:3px;
+    color:var(--gold,#c9a65b);
+    font-size:.68rem;
+    letter-spacing:.06em;
+    text-transform:uppercase;
+}
+
+.staff-contact{
+    display:flex;
+    flex-direction:column;
+    align-items:flex-start;
+    gap:5px;
+    margin-top:12px;
+    font-size:.82rem;
+}
+
+.staff-contact a{
+    overflow-wrap:anywhere;
+}
+
+@media(max-width:420px){
+    .staff-profile-grid{
+        grid-template-columns:1fr;
+    }
+
+    .staff-profile-card{
+        grid-template-columns:95px minmax(0,1fr);
+    }
+
+    .staff-profile-photo,
+    .staff-profile-placeholder{
+        width:95px;
+        height:130px;
+    }
+
+    .staff-profile-content{
+        padding:11px;
+    }
+}
+
+/* Light theme: readable staff ID cards */
+html[data-theme="light"] .staff-profile-card{
+    background:var(--surface,#fffdf8);
+    color:var(--ink,#17253b);
+    border-color:var(--line,#e7e1d5);
+}
+
+html[data-theme="light"] .staff-profile-content,
+html[data-theme="light"] .staff-profile-content h3,
+html[data-theme="light"] .staff-profile-content p,
+html[data-theme="light"] .staff-contact a{
+    color:var(--ink,#17253b);
+}
+
+html[data-theme="light"] .staff-profile-content .staff-job-title{
+    color:#a8791d;
+}
+
+html[data-theme="light"] .staff-detail strong,
+html[data-theme="light"] .staff-contact strong{
+    color:#946510;
+}
+
+
+/* Forest green hover effect for staff contact links */
+.staff-contact a{
+    display:inline-block;
+    padding:5px 8px;
+    border-radius:6px;
+    transition:background-color .2s ease,
+               color .2s ease,
+               transform .2s ease;
+}
+
+.staff-contact a:hover,
+.staff-contact a:focus-visible{
+    background:#166534;
+    color:#ffffff !important;
+    text-decoration:none;
+    transform:translateX(3px);
+}
+
