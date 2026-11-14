@@ -6,6 +6,9 @@ from pathlib import Path
 from flask import Flask, render_template, request, redirect, url_for, session, flash, abort, send_file, jsonify
 from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash
+import cloudinary
+import cloudinary.uploader
+import cloudinary.utils
 from .db import init_db, close_db, get_db, row, rows, now, audit
 from .auth import current_user, login_user, logout_user, login, role_required, student_required, staff_required, admin_required, assigned_student, set_password
 
@@ -38,6 +41,12 @@ def create_app(test_config=None):
 
     if test_config:
         app.config.update(test_config)
+    cloudinary.config(
+        cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),
+        api_key=os.getenv("CLOUDINARY_API_KEY"),
+        api_secret=os.getenv("CLOUDINARY_API_SECRET"),
+        secure=True
+    )
 
     Path(app.config['UPLOAD_DIR']).mkdir(parents=True, exist_ok=True)
     app.teardown_appcontext(close_db)
@@ -1598,29 +1607,65 @@ def create_app(test_config=None):
     def save_staff_photo(upload):
         if not upload or not upload.filename:
             return None, None
+
         original = secure_filename(upload.filename)
         if '.' not in original:
             return None, 'Choose a PNG, JPG, JPEG or WEBP image.'
+
         extension = original.rsplit('.', 1)[-1].lower()
         if extension not in {'png', 'jpg', 'jpeg', 'webp'}:
             return None, 'Staff photos must be PNG, JPG, JPEG or WEBP files.'
+
         upload.stream.seek(0, 2)
         size = upload.stream.tell()
         upload.stream.seek(0)
+
         if size > 5 * 1024 * 1024:
             return None, 'The staff photo must be 5 MB or smaller.'
-        filename = secrets.token_hex(12) + '.' + extension
-        upload.save(staff_photo_folder() / filename)
-        return filename, None
+
+        if not all(os.getenv(key) for key in (
+            'CLOUDINARY_CLOUD_NAME',
+            'CLOUDINARY_API_KEY',
+            'CLOUDINARY_API_SECRET'
+        )):
+            return None, 'Cloud photo storage is not configured.'
+
+        public_id = 'hsh_staff_' + secrets.token_hex(12)
+
+        try:
+            cloudinary.uploader.upload(
+                upload.stream,
+                resource_type='image',
+                public_id=public_id,
+                overwrite=False
+            )
+            return 'cld_' + public_id, None
+        except Exception:
+            app.logger.exception('Cloudinary staff photo upload failed')
+            return None, 'Could not upload the staff photo. Please try again.'
 
     def remove_staff_photo(filename):
-        if filename:
-            safe_name = secure_filename(filename)
-            if safe_name == filename:
-                folder = staff_photo_folder().resolve()
-                photo_path = (folder / safe_name).resolve()
-                if photo_path.parent == folder and photo_path.is_file():
-                    photo_path.unlink()
+        if not filename:
+            return
+
+        if filename.startswith('cld_'):
+            public_id = filename[4:]
+            try:
+                cloudinary.uploader.destroy(
+                    public_id,
+                    resource_type='image',
+                    invalidate=True
+                )
+            except Exception:
+                app.logger.exception('Cloudinary staff photo deletion failed')
+            return
+
+        safe_name = secure_filename(filename)
+        if safe_name == filename:
+            folder = staff_photo_folder().resolve()
+            photo_path = (folder / safe_name).resolve()
+            if photo_path.parent == folder and photo_path.is_file():
+                photo_path.unlink()
 
     @app.get('/about')
     def about():
@@ -1633,6 +1678,15 @@ def create_app(test_config=None):
 
     @app.get('/staff-photo/<filename>')
     def staff_photo(filename):
+        if filename.startswith('cld_'):
+            public_id = filename[4:]
+            if not re.fullmatch(r'hsh_staff_[a-f0-9]{24}', public_id):
+                abort(404)
+            photo_url = cloudinary.utils.cloudinary_url(
+                public_id, secure=True, resource_type='image'
+            )[0]
+            return redirect(photo_url)
+
         safe_name = secure_filename(filename)
         if not safe_name or safe_name != filename:
             abort(404)

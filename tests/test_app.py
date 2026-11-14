@@ -1348,3 +1348,69 @@ def test_student_cannot_open_or_submit_bulk_resource_permissions(client):
     )
     assert response.status_code == 403
 
+
+
+def test_staff_photo_cloudinary_upload_display_and_delete(client, app, monkeypatch):
+    import cloudinary.uploader
+    import cloudinary.utils
+
+    monkeypatch.setenv("CLOUDINARY_CLOUD_NAME", "test-cloud")
+    monkeypatch.setenv("CLOUDINARY_API_KEY", "test-key")
+    monkeypatch.setenv("CLOUDINARY_API_SECRET", "test-secret")
+
+    uploaded = {}
+    deleted = {}
+
+    def fake_upload(stream, **kwargs):
+        uploaded.update(kwargs)
+        return {"public_id": kwargs["public_id"]}
+
+    def fake_destroy(public_id, **kwargs):
+        deleted["public_id"] = public_id
+        return {"result": "ok"}
+
+    monkeypatch.setattr(cloudinary.uploader, "upload", fake_upload)
+    monkeypatch.setattr(cloudinary.uploader, "destroy", fake_destroy)
+    monkeypatch.setattr(
+        cloudinary.utils,
+        "cloudinary_url",
+        lambda public_id, **kwargs: (
+            "https://res.cloudinary.com/test-cloud/image/upload/" + public_id,
+            {}
+        )
+    )
+
+    login(client, "admin@holidayhub.local", "Admin@123")
+
+    response = client.post(
+        "/admin/staff/new",
+        data={
+            "full_name": "Cloudinary Photo Test",
+            "job_title": "Test Teacher",
+            "photo": (io.BytesIO(b"test image data"), "portrait.png"),
+        },
+        content_type="multipart/form-data",
+    )
+    assert response.status_code == 302
+    assert uploaded.get("resource_type") == "image"
+
+    with app.app_context():
+        profile = get_db().execute(
+            "SELECT id, photo_filename FROM staff_profiles WHERE full_name = ?",
+            ("Cloudinary Photo Test",),
+        ).fetchone()
+
+    assert profile is not None
+    assert profile["photo_filename"].startswith("cld_hsh_staff_")
+
+    photo_response = client.get(
+        "/staff-photo/" + profile["photo_filename"]
+    )
+    assert photo_response.status_code == 302
+    assert "res.cloudinary.com" in photo_response.location
+
+    delete_response = client.post(
+        f"/admin/staff/{profile['id']}/delete"
+    )
+    assert delete_response.status_code == 302
+    assert deleted["public_id"] == profile["photo_filename"][4:]
