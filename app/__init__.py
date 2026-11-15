@@ -856,9 +856,23 @@ def create_app(test_config=None):
                 rid=int(request.form['resource_id']); assigned_student(class_id=row('SELECT class_id FROM resources WHERE id=?',(rid,))['class_id']); get_db().execute('INSERT INTO download_requests(student_id,resource_id,reason,created_at) VALUES(?,?,?,?)',(u['id'],rid,request.form.get('reason',''),now())); get_db().commit(); audit(u['id'],'download_requested','resource',str(rid)); flash('Download request sent to an administrator.','success')
             else:
                 f=request.files.get('file'); ext=(f.filename.rsplit('.',1)[-1].lower() if f and '.' in f.filename else '')
-                if not f or ext not in ALLOWED_UPLOADS: flash('Upload a PDF or image file.','error')
+                if not f or ext not in ALLOWED_UPLOADS:
+                    flash('Upload a PDF or image file.','error')
                 else:
-                    token=secrets.token_hex(8)+'_'+secure_filename(f.filename); f.save(Path(app.config['UPLOAD_DIR'])/token); db=get_db(); db.execute('INSERT INTO resources(title,description,filename,level,class_id,subject_id,topic,uploaded_by,created_at) VALUES(?,?,?,?,?,?,?,?,?)',(request.form['title'],request.form.get('description',''),token,request.form['level'],request.form['class_id'],request.form['subject_id'],request.form.get('topic',''),u['id'],now())); db.commit(); audit(u['id'],'resource_uploaded','resource',token); flash('Resource uploaded.','success')
+                    token = None
+                    if ext == 'pdf':
+                        token, error = save_resource_pdf(f)
+                        if error:
+                            flash(error, 'error')
+                    else:
+                        token=secrets.token_hex(8)+'_'+secure_filename(f.filename)
+                        f.save(Path(app.config['UPLOAD_DIR'])/token)
+                    if token:
+                        db=get_db()
+                        db.execute('INSERT INTO resources(title,description,filename,level,class_id,subject_id,topic,uploaded_by,created_at) VALUES(?,?,?,?,?,?,?,?,?)',(request.form['title'],request.form.get('description',''),token,request.form['level'],request.form['class_id'],request.form['subject_id'],request.form.get('topic',''),u['id'],now()))
+                        db.commit()
+                        audit(u['id'],'resource_uploaded','resource',token)
+                        flash('Resource uploaded.','success')
         if u['role']=='student':
             resources=rows(
                 '''
@@ -885,7 +899,48 @@ def create_app(test_config=None):
             )
         else: resources=rows('SELECT r.*,c.name class_name,s.name subject_name,u.full_name uploader FROM resources r JOIN classes c ON c.id=r.class_id JOIN subjects s ON s.id=r.subject_id LEFT JOIN users u ON u.id=r.uploaded_by WHERE r.archived=0 ORDER BY r.created_at DESC')
         return render_template('library.html',resources=resources,profile=profile,requests=rows('SELECT dr.*,u.full_name,r.title FROM download_requests dr JOIN users u ON u.id=dr.student_id JOIN resources r ON r.id=dr.resource_id ORDER BY dr.id DESC') if u['role']=='admin' else [])
+    def save_resource_pdf(upload):
+        if not all(os.getenv(key) for key in (
+            'CLOUDINARY_CLOUD_NAME',
+            'CLOUDINARY_API_KEY',
+            'CLOUDINARY_API_SECRET'
+        )):
+            return None, 'Cloud PDF storage is not configured.'
+
+        public_id = 'hsh_resources/' + secrets.token_hex(16)
+        try:
+            result = cloudinary.uploader.upload(
+                upload.stream,
+                resource_type='image',
+                type='authenticated',
+                public_id=public_id,
+                format='pdf',
+                overwrite=False
+            )
+            return 'cld_pdf_' + result.get('public_id', public_id), None
+        except Exception:
+            app.logger.exception('Cloudinary resource PDF upload failed')
+            return None, 'Could not upload the PDF. Please try again.'
+
+    def resource_cloudinary_url(resource, attachment=False):
+        public_id = resource['filename'][len('cld_pdf_'):]
+        expires_at = int(datetime.now(timezone.utc).timestamp()) + 3600
+        return cloudinary.utils.private_download_url(
+            public_id,
+            'pdf',
+            resource_type='image',
+            type='authenticated',
+            expires_at=expires_at,
+            attachment=attachment
+        )
+
     def resource_file_details(resource):
+        if resource['filename'].startswith('cld_pdf_'):
+            title = (resource['title'] or '').strip() or 'Resource'
+            if Path(title).suffix.lower() != '.pdf':
+                title += '.pdf'
+            return None, title, 'application/pdf'
+
         path = Path(app.config['UPLOAD_DIR']) / resource['filename']
         if not path.is_file():
             abort(404)
@@ -934,6 +989,9 @@ def create_app(test_config=None):
         if current_user()['role'] == 'student':
             assigned_student(class_id=r['class_id'])
 
+        if r['filename'].startswith('cld_pdf_'):
+            return redirect(resource_cloudinary_url(r, attachment=False))
+
         path, display_name, mimetype = resource_file_details(r)
         return send_file(
             path,
@@ -977,6 +1035,9 @@ def create_app(test_config=None):
 
             if not individual_approval and not bulk_grant:
                 abort(403)
+
+        if r['filename'].startswith('cld_pdf_'):
+            return redirect(resource_cloudinary_url(r, attachment=True))
 
         path, display_name, mimetype = resource_file_details(r)
         return send_file(

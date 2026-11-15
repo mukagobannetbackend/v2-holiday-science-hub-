@@ -1414,3 +1414,64 @@ def test_staff_photo_cloudinary_upload_display_and_delete(client, app, monkeypat
     )
     assert delete_response.status_code == 302
     assert deleted["public_id"] == profile["photo_filename"][4:]
+
+
+def test_library_pdf_cloudinary_upload_and_access(client, monkeypatch):
+    import cloudinary.uploader
+    import cloudinary.utils
+
+    monkeypatch.setenv("CLOUDINARY_CLOUD_NAME", "test-cloud")
+    monkeypatch.setenv("CLOUDINARY_API_KEY", "test-key")
+    monkeypatch.setenv("CLOUDINARY_API_SECRET", "test-secret")
+
+    uploaded = {}
+    signed = []
+
+    def fake_upload(stream, **kwargs):
+        uploaded.update(kwargs)
+        return {"public_id": kwargs["public_id"]}
+
+    def fake_private_download(public_id, file_format, **kwargs):
+        signed.append((public_id, file_format, kwargs))
+        return "https://api.cloudinary.com/test-signed-pdf"
+
+    monkeypatch.setattr(cloudinary.uploader, "upload", fake_upload)
+    monkeypatch.setattr(cloudinary.utils, "private_download_url", fake_private_download)
+
+    login(client, "admin@holidayhub.local", "Admin@123")
+    response = client.post(
+        "/library",
+        data={
+            "title": "Cloudinary PDF Test",
+            "level": "O-Level",
+            "class_id": "2",
+            "subject_id": "1",
+            "topic": "Testing",
+            "description": "PDF storage test",
+            "file": (io.BytesIO(b"%PDF-1.4 test document"), "test.pdf"),
+        },
+        content_type="multipart/form-data",
+    )
+    assert response.status_code == 200
+    assert uploaded["resource_type"] == "image"
+    assert uploaded["type"] == "authenticated"
+    assert uploaded["format"] == "pdf"
+
+    with client.application.app_context():
+        resource = get_db().execute(
+            "SELECT * FROM resources WHERE title=?",
+            ("Cloudinary PDF Test",),
+        ).fetchone()
+
+    assert resource is not None
+    assert resource["filename"].startswith("cld_pdf_")
+
+    view = client.get(f"/resource/{resource['id']}/view")
+    assert view.status_code == 302
+    assert view.location == "https://api.cloudinary.com/test-signed-pdf"
+    assert signed[-1][2]["attachment"] is False
+
+    download = client.get(f"/resource/{resource['id']}/download")
+    assert download.status_code == 302
+    assert download.location == "https://api.cloudinary.com/test-signed-pdf"
+    assert signed[-1][2]["attachment"] is True
