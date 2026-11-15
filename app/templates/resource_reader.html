@@ -307,7 +307,7 @@
 
             const loadingTask = pdfjsLib.getDocument({
                 url: pdfUrl,
-                withCredentials: true
+                withCredentials: false
             });
 
             pdfDocument = await loadingTask.promise;
