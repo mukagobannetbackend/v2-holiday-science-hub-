@@ -1,4 +1,5 @@
 ﻿import io
+import app as app_module
 from pathlib import Path
 import pytest
 from app import create_app
@@ -73,6 +74,198 @@ def test_download_request_requires_admin_approval(client):
     disposition=download_response.headers.get('Content-Disposition','')
     assert 'attachment' in disposition.lower()
     assert 'S2_note.pdf' in disposition
+
+
+@pytest.mark.parametrize("extension", [".docx", ".ppt", ".pptx"])
+def test_office_resources_use_reader_without_unlocking_download(
+    client, app, monkeypatch, extension
+):
+    upload_dir = Path(app.config["UPLOAD_DIR"])
+    upload_dir.mkdir(parents=True, exist_ok=True)
+
+    filename = f"sample{extension}"
+    original_content = b"Original Office document"
+    (upload_dir / filename).write_bytes(original_content)
+
+    with app.app_context():
+        db = get_db()
+        db.execute(
+            """
+            INSERT INTO resources
+            (title, description, filename, level, class_id, subject_id,
+             topic, uploaded_by, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("Office resource", "", filename, "O-Level", 2, 1,
+             "Revision", 1, now())
+        )
+        db.commit()
+        resource_id = db.execute(
+            "SELECT id FROM resources WHERE filename=? ORDER BY id DESC LIMIT 1",
+            (filename,)
+        ).fetchone()["id"]
+
+    def fake_libreoffice(args, **kwargs):
+        output_dir = Path(args[args.index("--outdir") + 1])
+        source = Path(args[-1])
+        (output_dir / f"{source.stem}.pdf").write_bytes(
+            b"%PDF-1.4\nConverted Office document"
+        )
+
+        class Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return Result()
+
+    monkeypatch.setattr(app_module.subprocess, "run", fake_libreoffice)
+
+    login(client, "student@holidayhub.local", "Student@123")
+
+    reader = client.get(f"/resource/{resource_id}/reader")
+    assert reader.status_code == 200
+    assert b'id="pdf-canvas"' in reader.data
+    assert f"/resource/{resource_id}/view".encode() in reader.data
+
+    preview = client.get(f"/resource/{resource_id}/view")
+    assert preview.status_code == 200
+    assert preview.mimetype == "application/pdf"
+    assert b"Converted Office document" in preview.data
+
+    # Reading must not grant permission to download the original.
+    assert client.get(f"/resource/{resource_id}/download").status_code == 403
+    assert (upload_dir / filename).read_bytes() == original_content
+
+
+@pytest.mark.parametrize("extension", [".docx", ".ppt", ".pptx"])
+def test_cloudinary_office_upload_preview_and_download_permissions(
+    client, app, monkeypatch, extension
+):
+    monkeypatch.setenv("CLOUDINARY_CLOUD_NAME", "demo")
+    monkeypatch.setenv("CLOUDINARY_API_KEY", "123")
+    monkeypatch.setenv("CLOUDINARY_API_SECRET", "test")
+    app_module.cloudinary.config(
+        cloud_name="demo", api_key="123", api_secret="test", secure=True
+    )
+
+    original_content = b"Cloudinary Office original"
+    upload_calls = {}
+
+    def fake_upload(stream, **kwargs):
+        upload_calls.update(kwargs)
+        assert stream.read() == original_content
+        return {"public_id": kwargs["public_id"]}
+
+    monkeypatch.setattr(app_module.cloudinary.uploader, "upload", fake_upload)
+
+    login(client, "admin@holidayhub.local", "Admin@123")
+    response = client.post(
+        "/library",
+        data={
+            "title": "Cloud Office lesson",
+            "level": "O-Level",
+            "class_id": "2",
+            "subject_id": "1",
+            "topic": "Revision",
+            "description": "Cloudinary Office test",
+            "file": (io.BytesIO(original_content), f"lesson{extension}"),
+        },
+        content_type="multipart/form-data",
+        follow_redirects=True,
+    )
+    assert response.status_code == 200
+    assert b"Resource uploaded." in response.data
+    assert upload_calls["resource_type"] == "raw"
+    assert upload_calls["type"] == "authenticated"
+    assert upload_calls["overwrite"] is False
+    assert upload_calls["public_id"].endswith(extension)
+
+    with app.app_context():
+        resource = get_db().execute(
+            "SELECT * FROM resources WHERE title=? ORDER BY id DESC LIMIT 1",
+            ("Cloud Office lesson",),
+        ).fetchone()
+        assert resource is not None
+        resource_id = resource["id"]
+        assert resource["filename"] == "cld_raw_" + upload_calls["public_id"]
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self, limit=-1):
+            return original_content[:limit]
+
+    requested_urls = []
+
+    def fake_urlopen(url, timeout=0):
+        requested_urls.append(url)
+        assert timeout == 30
+        return FakeResponse()
+
+    monkeypatch.setattr(app_module.urllib.request, "urlopen", fake_urlopen)
+
+    def fake_libreoffice(args, **kwargs):
+        source = Path(args[-1])
+        output_dir = Path(args[args.index("--outdir") + 1])
+        (output_dir / f"{source.stem}.pdf").write_bytes(
+            b"%PDF-1.4\nConverted Cloudinary Office document"
+        )
+
+        class Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return Result()
+
+    monkeypatch.setattr(app_module.subprocess, "run", fake_libreoffice)
+
+    client.get("/logout")
+    login(client, "student@holidayhub.local", "Student@123")
+
+    reader = client.get(f"/resource/{resource_id}/reader")
+    assert reader.status_code == 200
+    assert f"/resource/{resource_id}/view".encode() in reader.data
+
+    preview = client.get(f"/resource/{resource_id}/view")
+    assert preview.status_code == 200
+    assert preview.mimetype == "application/pdf"
+    assert b"Converted Cloudinary Office document" in preview.data
+    assert requested_urls
+    assert "raw/download" in requested_urls[0]
+
+    # Reading does not unlock the original Office download.
+    assert client.get(f"/resource/{resource_id}/download").status_code == 403
+
+    client.post(
+        "/library",
+        data={"resource_id": str(resource_id), "reason": "Offline study"},
+        follow_redirects=True,
+    )
+
+    client.get("/logout")
+    login(client, "admin@holidayhub.local", "Admin@123")
+    with app.app_context():
+        request_id = get_db().execute(
+            "SELECT id FROM download_requests WHERE resource_id=? "
+            "ORDER BY id DESC LIMIT 1",
+            (resource_id,),
+        ).fetchone()["id"]
+
+    client.post(f"/downloads/{request_id}/approve")
+
+    client.get("/logout")
+    login(client, "student@holidayhub.local", "Student@123")
+    download = client.get(f"/resource/{resource_id}/download")
+
+    assert download.status_code == 302
+    assert "raw/download" in download.headers["Location"]
+    assert "attachment=1" in download.headers["Location"]
 
 def test_written_test_draft_and_submission_lock(client):
     login(client,'student@holidayhub.local','Student@123')

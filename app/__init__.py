@@ -1,6 +1,6 @@
 from __future__ import annotations
 import csv, io, os, re, secrets, mimetypes
-import html, zipfile
+import html, zipfile, subprocess, tempfile, urllib.request
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from flask import Flask, render_template, request, redirect, url_for, session, flash, abort, send_file, jsonify
@@ -12,7 +12,7 @@ import cloudinary.utils
 from .db import init_db, close_db, get_db, row, rows, now, audit
 from .auth import current_user, login_user, logout_user, login, role_required, student_required, staff_required, admin_required, assigned_student, set_password
 
-ALLOWED_UPLOADS={'pdf','png','jpg','jpeg'}
+ALLOWED_UPLOADS={'pdf','png','jpg','jpeg','docx','pptx','ppt'}
 def create_app(test_config=None):
     app = Flask(__name__, instance_relative_config=True)
 
@@ -857,11 +857,15 @@ def create_app(test_config=None):
             else:
                 f=request.files.get('file'); ext=(f.filename.rsplit('.',1)[-1].lower() if f and '.' in f.filename else '')
                 if not f or ext not in ALLOWED_UPLOADS:
-                    flash('Upload a PDF or image file.','error')
+                    flash('Upload a PDF, Word document, PowerPoint presentation, or image file.','error')
                 else:
                     token = None
                     if ext == 'pdf':
                         token, error = save_resource_pdf(f)
+                        if error:
+                            flash(error, 'error')
+                    elif ext in {'docx', 'ppt', 'pptx'}:
+                        token, error = save_resource_office(f, ext)
                         if error:
                             flash(error, 'error')
                     else:
@@ -922,6 +926,50 @@ def create_app(test_config=None):
             app.logger.exception('Cloudinary resource PDF upload failed')
             return None, 'Could not upload the PDF. Please try again.'
 
+    def save_resource_office(upload, extension):
+        if not all(os.getenv(key) for key in (
+            'CLOUDINARY_CLOUD_NAME',
+            'CLOUDINARY_API_KEY',
+            'CLOUDINARY_API_SECRET'
+        )):
+            return None, 'Cloud Office storage is not configured.'
+
+        extension = extension.lower().lstrip('.')
+        if extension not in {'docx', 'ppt', 'pptx'}:
+            return None, 'Unsupported Office document format.'
+
+        public_id = f'hsh_resources/{secrets.token_hex(16)}.{extension}'
+
+        try:
+            result = cloudinary.uploader.upload(
+                upload.stream,
+                resource_type='raw',
+                type='authenticated',
+                public_id=public_id,
+                overwrite=False
+            )
+            return 'cld_raw_' + result.get('public_id', public_id), None
+        except Exception:
+            app.logger.exception('Cloudinary Office resource upload failed')
+            return None, 'Could not upload the Office document. Please try again.'
+
+    def resource_cloudinary_raw_url(resource, attachment=False):
+        public_id = resource['filename'][len('cld_raw_'):]
+        extension = Path(public_id).suffix.lower().lstrip('.')
+
+        if extension not in {'docx', 'ppt', 'pptx'}:
+            abort(404)
+
+        expires_at = int(datetime.now(timezone.utc).timestamp()) + 3600
+        return cloudinary.utils.private_download_url(
+            public_id,
+            extension,
+            resource_type='raw',
+            type='authenticated',
+            expires_at=expires_at,
+            attachment=attachment
+        )
+
     def resource_cloudinary_url(resource, attachment=False):
         public_id = resource['filename'][len('cld_pdf_'):]
         expires_at = int(datetime.now(timezone.utc).timestamp()) + 3600
@@ -941,6 +989,17 @@ def create_app(test_config=None):
                 title += '.pdf'
             return None, title, 'application/pdf'
 
+        if resource['filename'].startswith('cld_raw_'):
+            public_id = resource['filename'][len('cld_raw_'):]
+            extension = Path(public_id).suffix.lower()
+            if extension not in {'.docx', '.ppt', '.pptx'}:
+                abort(404)
+            title = (resource['title'] or '').strip() or Path(public_id).name
+            if Path(title).suffix.lower() != extension:
+                title += extension
+            mimetype = mimetypes.guess_type('resource' + extension)[0] or 'application/octet-stream'
+            return None, title, mimetype
+
         path = Path(app.config['UPLOAD_DIR']) / resource['filename']
         if not path.is_file():
             abort(404)
@@ -953,6 +1012,61 @@ def create_app(test_config=None):
 
         mimetype = mimetypes.guess_type(path.name)[0] or 'application/octet-stream'
         return path, title, mimetype
+
+    def cloudinary_office_document_to_pdf(resource):
+        _, display_name, _ = resource_file_details(resource)
+        extension = Path(resource['filename']).suffix.lower()
+
+        with tempfile.TemporaryDirectory(prefix='hsh-cloud-office-') as temp_dir:
+            source_path = Path(temp_dir) / f'original{extension}'
+            download_url = resource_cloudinary_raw_url(resource, attachment=False)
+
+            try:
+                with urllib.request.urlopen(download_url, timeout=30) as response:
+                    content = response.read(25 * 1024 * 1024 + 1)
+            except Exception:
+                app.logger.exception('Cloudinary Office resource download failed')
+                abort(503, description='This Office document could not be retrieved for reading.')
+
+            if len(content) > 25 * 1024 * 1024:
+                abort(413, description='This Office document exceeds the supported file size.')
+
+            source_path.write_bytes(content)
+            return office_document_to_pdf(source_path)
+
+
+    def office_document_to_pdf(path):
+        try:
+            with tempfile.TemporaryDirectory(prefix='hsh-office-') as temp_dir:
+                output_dir = Path(temp_dir)
+                profile_dir = output_dir / 'lo-profile'
+
+                result = subprocess.run(
+                    [
+                        'libreoffice',
+                        '--headless',
+                        f'-env:UserInstallation={profile_dir.as_uri()}',
+                        '--convert-to', 'pdf',
+                        '--outdir', str(output_dir),
+                        str(path)
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=90,
+                    check=False
+                )
+
+                pdf_path = output_dir / f'{path.stem}.pdf'
+
+                if result.returncode != 0 or not pdf_path.is_file() or pdf_path.stat().st_size == 0:
+                    abort(503, description='This Office document could not be converted for reading.')
+
+                return io.BytesIO(pdf_path.read_bytes())
+
+        except FileNotFoundError:
+            abort(503, description='Office document preview is unavailable because the converter is not installed.')
+        except subprocess.TimeoutExpired:
+            abort(503, description='Office document conversion took too long. Please try again.')
 
     @app.get('/resource/<int:resource_id>/reader')
     @role_required('admin','teacher','student')
@@ -974,6 +1088,9 @@ def create_app(test_config=None):
 
         _, _, mimetype = resource_file_details(resource)
 
+        if Path(resource['filename']).suffix.lower() in {'.docx', '.ppt', '.pptx'}:
+            mimetype = 'application/pdf'
+
         return render_template(
             'resource_reader.html',
             resource=resource,
@@ -993,6 +1110,25 @@ def create_app(test_config=None):
             return redirect(resource_cloudinary_url(r, attachment=False))
 
         path, display_name, mimetype = resource_file_details(r)
+
+        if r['filename'].startswith('cld_raw_'):
+            pdf_file = cloudinary_office_document_to_pdf(r)
+            return send_file(
+                pdf_file,
+                mimetype='application/pdf',
+                as_attachment=False,
+                download_name=f'{Path(display_name).stem}.pdf'
+            )
+
+        if Path(r['filename']).suffix.lower() in {'.docx', '.ppt', '.pptx'}:
+            pdf_file = office_document_to_pdf(path)
+            return send_file(
+                pdf_file,
+                mimetype='application/pdf',
+                as_attachment=False,
+                download_name=f'{Path(display_name).stem}.pdf'
+            )
+
         return send_file(
             path,
             mimetype=mimetype,
@@ -1038,6 +1174,9 @@ def create_app(test_config=None):
 
         if r['filename'].startswith('cld_pdf_'):
             return redirect(resource_cloudinary_url(r, attachment=True))
+
+        if r['filename'].startswith('cld_raw_'):
+            return redirect(resource_cloudinary_raw_url(r, attachment=True))
 
         path, display_name, mimetype = resource_file_details(r)
         return send_file(
